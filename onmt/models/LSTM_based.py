@@ -1,5 +1,3 @@
-import random
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,25 +6,22 @@ from collections import defaultdict
 import math
 import onmt
 from onmt.modules.base_seq2seq import NMTModel, DecoderState
-from onmt.models.transformer_layers import  PrePostProcessing
+from onmt.models.transformer_layers import PrePostProcessing
 from onmt.modules.attention import MultiHeadAttention
 from onmt.modules.optimized.self_attention import SelfMultiheadAttn
-from onmt.modules.optimized.encdec_attention import EncdecMultiheadAttn
-from onmt.modules.dropout import embedded_dropout, switchout
-from onmt.models.transformer_layers import EncoderLayer, DecoderLayer
-import random
-import time
-#from . import WordDropout, freeze_module
-#from .attn import MultiHeadAttention
+from onmt.modules.dropout import embedded_dropout
+
+
+
+# from . import WordDropout, freeze_module
+# from .attn import MultiHeadAttention
 
 
 class SpeechLSTMEncoder(nn.Module):
-    def __init__(self,opt, embedding, encoder_type='audio' ):
+    def __init__(self, opt, embedding, encoder_type='audio'):
         super(SpeechLSTMEncoder, self).__init__()
         self.opt = opt
         self.model_size = opt.model_size
-
-
 
         if hasattr(opt, 'encoder_layers') and opt.encoder_layers != -1:
             self.layers = opt.encoder_layers
@@ -59,7 +54,6 @@ class SpeechLSTMEncoder(nn.Module):
         if opt.upsampling:
             feature_size = feature_size // 4
 
-
         if not self.cnn_downsampling:
             self.audio_trans = nn.Linear(feature_size, self.model_size)
             torch.nn.init.xavier_uniform_(self.audio_trans.weight)
@@ -72,8 +66,8 @@ class SpeechLSTMEncoder(nn.Module):
             # cnn.append()
             self.audio_trans = nn.Sequential(*cnn)
             self.linear_trans = nn.Linear(feat_size, self.model_size)
-                # assert self.model_size == feat_size, \
-                #     "The model dimension doesn't match with the feature dim, expecting %d " % feat_size
+            # assert self.model_size == feat_size, \
+            #     "The model dimension doesn't match with the feature dim, expecting %d " % feat_size
 
         # if use_cnn:
         #     cnn = [nn.Conv2d(1, 32, kernel_size=(3, freq_kn), stride=(2, freq_std)),
@@ -92,10 +86,9 @@ class SpeechLSTMEncoder(nn.Module):
                                                   variational=self.varitional_dropout)
         self.postprocess_layer = PrePostProcessing(self.model_size, 0, sequence='n')
 
-        #self.incl_win = opt.incl_win
+        # self.incl_win = opt.incl_win
 
-#TO_DO
-
+    # TO_DO
 
     # def rnn_fwd_incl(self, seq, mask, hid=None):
     #     win, time_len = self.incl_win, seq.size(1)
@@ -138,18 +131,16 @@ class SpeechLSTMEncoder(nn.Module):
     #     return seq_2, hid
 
     def forward(self, input, hid=None):
-       # print(input)
+        # print(input)
         if not self.cnn_downsampling:
             mask_src = input.narrow(2, 0, 1).squeeze(2).gt(onmt.constants.PAD)
             input = input.narrow(2, 1, input.size(2) - 1)
-       #     print(input.shape)
             emb = self.audio_trans(input.contiguous().view(-1, input.size(2))).view(input.size(0),
                                                                                     input.size(1), -1)
             emb = emb.type_as(input)
         else:
-            # print(input.narrow(2, 0, 1))
-            long_mask = input.narrow(2, 0, 1).squeeze(2).gt(onmt.constants.PAD)
 
+            long_mask = input.narrow(2, 0, 1).squeeze(2).gt(onmt.constants.PAD)
             input = input.narrow(2, 1, input.size(2) - 1)
             # first resizing to fit the CNN format
             input = input.view(input.size(0), input.size(1), -1, self.channels)
@@ -158,22 +149,13 @@ class SpeechLSTMEncoder(nn.Module):
             input = self.audio_trans(input)
             input = input.permute(0, 2, 1, 3).contiguous()
             input = input.view(input.size(0), input.size(1), -1)
-            # print(input.size())
             input = self.linear_trans(input)
 
             mask_src = long_mask[:, 0:input.size(1) * 4:4]
             # the size seems to be B x T ?
             emb = input
-
-        # start = time.time()
-        # seq, hid_2 = self.rnn_fwd_2(emb, mask_src, hid)
-        # print("time_2 " + str(time.time() - start))
-
-        # start = time.time()
         seq, hid = self.rnn_fwd(emb, mask_src, hid)
         # print("time_1  " + str(time.time() - start ))
-
-
 
         if not self.unidirect:
             hidden_size = seq.size(2) // 2
@@ -184,7 +166,7 @@ class SpeechLSTMEncoder(nn.Module):
         # print(emb.shape)
         seq = self.postprocess_layer(seq)
 
-        output_dict = {'context': seq.transpose(0,1), 'src_mask': mask_src}
+        output_dict = {'context': seq.transpose(0, 1), 'src_mask': mask_src}
 
         return output_dict
 
@@ -194,8 +176,6 @@ class SpeechLSTMDecoder(nn.Module):
         super(SpeechLSTMDecoder, self).__init__()
 
         # Keep for reference
-
-
 
         # Define layers
         self.model_size = opt.model_size
@@ -209,14 +189,14 @@ class SpeechLSTMDecoder(nn.Module):
 
         self.encoder_type = opt.encoder_type
 
-        self.lstm = nn.LSTM(self.model_size, self.model_size, self.layers , dropout=self.dropout, batch_first=True)
+        self.lstm = nn.LSTM(self.model_size, self.model_size, self.layers, dropout=self.dropout, batch_first=True)
 
         self.fast_self_attention = opt.fast_self_attention
 
-        if not opt.fast_xattention:
-            self.multihead_tgt = MultiHeadAttention(opt.n_heads, opt.model_size, attn_p=opt.attn_dropout, share=3)
+        if opt.fast_self_attention:
+            self.multihead_tgt = SelfMultiheadAttn(opt.model_size, opt.n_heads, opt.attn_dropout)
         else:
-            self.multihead_tgt = EncdecMultiheadAttn(opt.n_heads, opt.model_size, opt.attn_dropout)
+            self.multihead_tgt = MultiHeadAttention(opt.n_heads, opt.model_size, attn_p=opt.attn_dropout, share=3)
 
         self.preprocess_layer = PrePostProcessing(self.model_size, self.emb_dropout, sequence='d',
                                                   variational=self.variational_dropout)
@@ -233,30 +213,22 @@ class SpeechLSTMDecoder(nn.Module):
         if self.language_embedding_type == 'concat':
             self.projector = nn.Linear(opt.model_size * 2, opt.model_size)
 
-        #attention_layer = DecoderLayer(self.opt)
-
-        # nn.init.xavier_normal_(self.project.weight)
-        # if shared_emb: self.emb.weight = self.project.weight
 
     def process_embedding(self, input, input_lang=None):
-
 
         return input
 
     def step(self, input, decoder_state, **kwargs):
         context = decoder_state.context
         buffer = decoder_state.LSTM_buffer
-        hid  = buffer["hidden_state"]
+        hid = buffer["hidden_state"]
         cell = buffer["cell_state"]
         if hid is not None:
-            #hid, cell = torch.stack(hid, dim=1), torch.stack(cell, dim=1)
             hid_cell = (hid, cell)
         else:
             hid_cell = None
 
         lang = decoder_state.tgt_lang
-
-
 
         if decoder_state.concat_input_seq:
             if decoder_state.input_seq is None:
@@ -272,10 +244,7 @@ class SpeechLSTMDecoder(nn.Module):
             input_ = input[:, -1].unsqueeze(1)
         else:
             input_ = input
-        # input_ = input
-        # print(input_.size())
-        # print(input_)
-        # print(self.word_lut.weight.shape)
+
         emb = self.word_lut(input_)
 
         emb = emb * math.sqrt(self.model_size)
@@ -316,8 +285,10 @@ class SpeechLSTMDecoder(nn.Module):
             mask_src = None
 
         if input_.size(0) > 1 and input_.size(1) > 1:
-
+            # print(dec_seq)
+            #
             lengths = input.gt(onmt.constants.PAD).sum(-1)
+
             dec_in = pack_padded_sequence(dec_emb, lengths, batch_first=True, enforce_sorted=False)
             dec_out, hidden = self.lstm(dec_in, hid_cell)
             dec_out = pad_packed_sequence(dec_out, batch_first=True)[0]
@@ -325,41 +296,25 @@ class SpeechLSTMDecoder(nn.Module):
 
             dec_out, hid_cell = self.lstm(dec_emb, hid_cell)
 
-
         decoder_state.update_LSTM_buffer(hid_cell)
 
         lt = input_.size(1)
         attn_mask = mask_src.expand(-1, lt, -1)
         dec_out = self.postprocess_layer(dec_out)
 
-        dec_out = dec_out.transpose(0,1)
-        # print(dec_out.shape)
-        # print(attn_mask.shape)
-
-        output , coverage = self.multihead_tgt(dec_out, context, context , attn_mask)
-
-
+        dec_out = dec_out.transpose(0, 1)
+        output, coverage = self.multihead_tgt(dec_out, context, context, attn_mask)
         output = (output + dec_out)
         output = self.postprocess_layer(output)
 
-        # print("output")
-        # print(output.shape)
+
 
         output_dict = defaultdict(lambda: None, {'hidden': output, 'coverage': coverage, 'context': context})
 
         return output_dict
 
+    def forward(self, dec_seq, enc_out, src, tgt_lang=None, hid=None, **kwargs):
 
-    def forward(self, dec_seq, enc_out, src , tgt_lang=None, hid=None, **kwargs):
-        #print("dec_seq")
-        #print(dec_seq.shape)
-        # dec_emb = self.process_embedding(dec_seq, tgt_lang)
-        #print("dec_emb")
-        #print(dec_emb.shape)
-        #print("src")
-        #print(src.shape)
-        #print("enc_out")
-        #print(enc_out.shape)
         emb = embedded_dropout(self.word_lut, dec_seq, dropout=self.word_dropout if self.training else 0)
         emb = emb * math.sqrt(self.model_size)
 
@@ -416,9 +371,9 @@ class SpeechLSTMDecoder(nn.Module):
         attn_mask = mask_src.expand(-1, lt, -1)
         dec_out = self.postprocess_layer(dec_out)
 
-        dec_out = dec_out.transpose(0,1)
+        dec_out = dec_out.transpose(0, 1)
         # enc_out = enc_out.transpose(0,1)
-        output , coverage = self.multihead_tgt(dec_out, enc_out, enc_out , attn_mask)
+        output, coverage = self.multihead_tgt(dec_out, enc_out, enc_out, attn_mask)
         output = (output + dec_out)
         output = self.postprocess_layer(output)
         # output = self.project(context)
@@ -437,20 +392,6 @@ class SpeechLSTMSeq2Seq(NMTModel):
         else:
             self.src_vocab_size = 0
 
-
-
-    # def freeze(self, mode=0):
-    #     if mode == 1:
-    #         freeze_module(self.encoder)
-    #         print("freeze the encoder")
-    #     elif mode == 2:
-    #         freeze_module(self.decoder)
-    #         print("freeze the decoder")
-    #
-    # def attend(self, src_seq, src_mask, tgt_seq):
-    #     enc_out, src_mask = self.encoder(src_seq, src_mask)[0:2]
-    #     logit, attn = self.decoder(tgt_seq, enc_out, src_mask)[0:2]
-    #     return logit, attn, src_mask
     def reset_states(self):
         return
 
@@ -483,7 +424,7 @@ class SpeechLSTMSeq2Seq(NMTModel):
                                       streaming_state=streaming_state)
 
         decoder_output = defaultdict(lambda: None, decoder_output)
-       # streaming_state = decoder_output['streaming_state']
+        # streaming_state = decoder_output['streaming_state']
         output = decoder_output['hidden']
 
         output_dict = defaultdict(lambda: None, decoder_output)
@@ -493,7 +434,7 @@ class SpeechLSTMSeq2Seq(NMTModel):
         output_dict['src'] = src
         output_dict['target_mask'] = target_mask
         output_dict['reconstruct'] = None
-       # output_dict['streaming_state'] = streaming_state
+        # output_dict['streaming_state'] = streaming_state
         output_dict['target'] = batch.get('target_output')
 
         if self.training and nce:
@@ -535,7 +476,7 @@ class SpeechLSTMSeq2Seq(NMTModel):
         """
         src = batch.get('source')
         src_pos = batch.get('source_pos')
-       # tgt_atb = batch.get('target_atb')
+        # tgt_atb = batch.get('target_atb')
         src_lang = batch.get('source_lang')
         tgt_lang = batch.get('target_lang')
 
@@ -543,8 +484,8 @@ class SpeechLSTMSeq2Seq(NMTModel):
 
         encoder_output = self.encoder(src_transposed)
         decoder_state = LSTMDecodingState(src, tgt_lang, encoder_output['context'],
-                                                 beam_size=beam_size, model_size=self.model_size,
-                                                 type=type, buffering=buffering)
+                                          beam_size=beam_size, model_size=self.model_size,
+                                          type=type, buffering=buffering)
 
         return decoder_state
 
@@ -622,7 +563,7 @@ class LSTMDecodingState(DecoderState):
                 self.src = None
 
             if context is not None:
-                    self.context = context.repeat(1, beam_size, 1)
+                self.context = context.repeat(1, beam_size, 1)
             else:
                 self.context = None
 
@@ -663,7 +604,6 @@ class LSTMDecodingState(DecoderState):
         self.LSTM_buffer["hidden_state"] = hid
         self.LSTM_buffer["cell_state"] = cell
 
-
     def update_beam(self, beam, b, remaining_sents, idx):
 
         if self.beam_size == 1:
@@ -685,7 +625,6 @@ class LSTMDecodingState(DecoderState):
         for l in self.LSTM_buffer:
             buffer_ = self.LSTM_buffer[l]
 
-
             t_, br_, d_ = buffer_.size()
             # print(buffer_.size())
             sent_states = buffer_.view(t_, self.beam_size, remaining_sents, d_)[:, :, idx, :]
@@ -693,6 +632,7 @@ class LSTMDecodingState(DecoderState):
             sent_states.data.copy_(sent_states.data.index_select(1, beam[b].getCurrentOrigin()))
             # print(sent_states.shape)
             # print(self.LSTM_buffer[l].shape)
+
     def prune_complete_beam(self, active_idx, remaining_sents):
 
         model_size = self.model_size
@@ -734,7 +674,8 @@ class LSTMDecodingState(DecoderState):
         for l in self.LSTM_buffer:
             buffer_ = self.LSTM_buffer[l]
 
-
             buffer = update_active_with_hidden(buffer_)
 
             self.LSTM_buffer[l] = buffer
+
+
