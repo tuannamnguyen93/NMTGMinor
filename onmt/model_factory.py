@@ -9,7 +9,7 @@ from onmt.models.relative_transformer import SinusoidalPositionalEmbedding, Rela
 from onmt.modules.copy_generator import CopyGenerator
 from options import backward_compatible
 import math
-
+import sys
 init = torch.nn.init
 
 MAX_LEN = onmt.constants.max_position_length  # This should be the longest sentence from the dataset
@@ -92,9 +92,9 @@ def build_tm_model(opt, dicts):
     else:
         embedding_tgt = nn.Embedding(dicts['tgt'].size(),
                                      opt.model_size,
-                                     padding_idx=onmt.constants.PAD)
+                                     padding_idx=onmt.constants.PAD) #done
 
-    if opt.use_language_embedding:
+    if opt.use_language_embedding: #done
         print("* Create language embeddings with %d languages" % len(dicts['langs']))
         language_embeddings = nn.Embedding(len(dicts['langs']), opt.model_size)
     else:
@@ -118,17 +118,20 @@ def build_tm_model(opt, dicts):
         decoder = SpeechTransformerDecoder(opt, embedding_tgt, positional_encoder,
                                            language_embeddings=language_embeddings)
         model = RelativeTransformer(encoder, decoder, nn.ModuleList(generators),
-                                    None, None, mirror=opt.mirror_loss)
+                                    None, None,mirror=opt.mirror_loss)
 
-        # If we use the multilingual model and weights are partitioned:
-        if opt.multilingual_partitioned_weights:
+    elif opt.model == "LSTM":
+        print("LSTM")
+        onmt.constants.init_value = opt.param_init
+        from onmt.models.LSTM_based import SpeechLSTMDecoder, SpeechLSTMEncoder, SpeechLSTMSeq2Seq
 
-            # this is basically the language embeddings
-            factor_embeddings = nn.Embedding(len(dicts['langs']), opt.mpw_factor_size)
+        encoder = SpeechLSTMEncoder(opt, None,  opt.encoder_type)
 
-            encoder.factor_embeddings = factor_embeddings
-            decoder.factor_embeddings = factor_embeddings
+        decoder = SpeechLSTMDecoder(opt, embedding_tgt, language_embeddings=language_embeddings)
 
+        model = SpeechLSTMSeq2Seq(encoder, decoder, nn.ModuleList(generators))
+        # print(model)
+        # sys.exit()
     elif opt.model in ['multilingual_translator', 'translator']:
         onmt.constants.init_value = opt.param_init
         from onmt.models.multilingual_translator.relative_transformer import \
@@ -277,17 +280,11 @@ def init_model_parameters(model, opt):
     # opt.init something ...
 
     def init_weight(weight):
-        if opt.init == 'normal':
-            if len(weight.shape) == 2:
-                std_ = math.sqrt(2.0 / (weight.shape[0] + weight.shape[1]))
-                nn.init.normal_(weight, 0.0, std_)
-            else:
-                nn.init.normal_(weight, 0.0, init_std)
-        elif opt.init == 'uniform':
-            if len(weight.shape) == 2:
-                nn.init.xavier_uniform_(weight)
-            else:
-                nn.init.uniform_(weight, -init_std, init_std)
+        if len(weight.shape) == 2:
+            std_ = math.sqrt(2.0 / (weight.shape[0] + weight.shape[1]))
+            nn.init.normal_(weight, 0.0, std_)
+        else:
+            nn.init.normal_(weight, 0.0, init_std)
 
     def init_embed(weight, padding_idx=0):
 
@@ -307,10 +304,12 @@ def init_model_parameters(model, opt):
     def weights_init(m):
         classname = m.__class__.__name__
         if classname.find('Linear') != -1:
-            if hasattr(m, 'weight') and m.weight is not None:
-                init_weight(m.weight)
-            if hasattr(m, 'bias') and m.bias is not None:
-                init_bias(m.bias)
+            # if hasattr(m, 'weight') and m.weight is not None:
+            #     init_weight(m.weight)
+            # if hasattr(m, 'bias') and m.bias is not None:
+            #     init_bias(m.bias)
+            pass
+
         elif classname.find('Embedding') != -1:
 
             initialize = True
@@ -320,17 +319,12 @@ def init_model_parameters(model, opt):
             if initialize:
                 if hasattr(m, 'weight') and hasattr(m, 'padding_idx'):
                     init_embed(m.weight, m.padding_idx)
-            # nn.init.constant_(m.weight[m.padding_idx], 0.0)
 
         elif classname.find('LayerNorm') != -1 or classname.find('FusedLayerNorm') != -1:
             if hasattr(m, 'weight'):
-                if opt.init == 'normal':
-                    nn.init.normal_(m.weight, 1.0, init_std)
-                else:
-                    nn.init.uniform_(m.weight, 1.0 - init_std, 1.0 + init_std)
+                nn.init.normal_(m.weight, 1.0, init_std)
             if hasattr(m, 'bias') and m.bias is not None:
                 init_bias(m.bias)
-            pass
         elif classname.find('RelativeTransformerEncoder') != -1:
             if hasattr(m, 'r_emb'):
                 init_weight(m.r_emb)
@@ -368,14 +362,6 @@ def init_model_parameters(model, opt):
     else:
         model.tgt_embedding.apply(weights_init)
 
-    if opt.multilingual_partitioned_weights:
-        factor_embeddings = model.encoder.factor_embeddings
-
-        # this embedding scheme avoids a large initial perplexity
-        # basically an on-off switch to start with
-        with torch.no_grad():
-            # factor_embeddings.weight.bernoulli_(0.5).mul_(-2).add_(1)
-            factor_embeddings.weight.uniform_(-1, 1)
     return
 
 
@@ -435,7 +421,7 @@ def build_fusion(opt, dicts):
     return model
 
 
-def optimize_model(model, fp16=True):
+def optimize_model(model, distributed=False):
     """
     Used to potentially upgrade the components with more optimized counterparts in the future
     """
@@ -444,7 +430,6 @@ def optimize_model(model, fp16=True):
 
         replacable = True
         try:
-            # from apex.normalization.fused_layer_norm import FusedLayerNorm
             import importlib
             from apex.normalization.fused_layer_norm import FusedLayerNorm
             fused_layer_norm_cuda = importlib.import_module("fused_layer_norm_cuda")
@@ -462,20 +447,28 @@ def optimize_model(model, fp16=True):
             for n, ch in m.named_children():
                 replace_layer_norm(ch, n)
 
-    def safe_batch_norm(m, name):
-        for attr_str in dir(m):
-            target_attr = getattr(m, attr_str)
-            if type(target_attr) == torch.nn.BatchNorm2d or type(target_attr) == torch.nn.BatchNorm1d:
+    def sync_batch_norm(m, name):
 
-                if fp16:
-                    target_attr.eps = 1e-4  # tiny value for fp16 according to AllenNLP
+        replacable = True
 
-                setattr(m, attr_str, target_attr)
-                # setattr(m, attr_str, FusedLayerNorm(target_attr.normalized_shape,
-                #                                     eps=target_attr.eps,
-                #                                     elementwise_affine=target_attr.elementwise_affine))
+        try:
+            import importlib
+            from apex.normalization.fused_layer_norm import FusedLayerNorm
+            fused_layer_norm_cuda = importlib.import_module("fused_layer_norm_cuda")
+        except ModuleNotFoundError:
+            replacable = False
+
+        if replacable:
+            import apex
+            for attr_str in dir(m):
+                target_attr = getattr(m, attr_str)
+                if type(target_attr) == torch.nn.BatchNorm1d or type(target_attr) == torch.nn.BatchNorm2d:
+                    setattr(m, attr_str, apex.parallel.convert_syncbn_model(target_attr))
+            for n, ch in m.named_children():
+                sync_batch_norm(ch, n)
 
     replace_layer_norm(model, "Transformer")
 
-    if fp16:
-        safe_batch_norm(model, "Transformer")
+    if distributed:
+        sync_batch_norm(model, "Transformer")
+
