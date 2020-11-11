@@ -11,6 +11,7 @@ from onmt.modules.base_seq2seq import NMTModel, DecoderState
 from onmt.models.transformer_layers import  PrePostProcessing
 from onmt.modules.attention import MultiHeadAttention
 from onmt.modules.optimized.self_attention import SelfMultiheadAttn
+from onmt.modules.optimized.encdec_attention import EncdecMultiheadAttn
 from onmt.modules.dropout import embedded_dropout, switchout
 from onmt.models.transformer_layers import EncoderLayer, DecoderLayer
 import random
@@ -212,10 +213,10 @@ class SpeechLSTMDecoder(nn.Module):
 
         self.fast_self_attention = opt.fast_self_attention
 
-        if opt.fast_self_attention:
-            self.multihead_tgt = SelfMultiheadAttn(opt.model_size, opt.n_heads, opt.attn_dropout)
-        else:
+        if not opt.fast_xattention:
             self.multihead_tgt = MultiHeadAttention(opt.n_heads, opt.model_size, attn_p=opt.attn_dropout, share=3)
+        else:
+            self.multihead_tgt = EncdecMultiheadAttn(opt.n_heads, opt.model_size, opt.attn_dropout)
 
         self.preprocess_layer = PrePostProcessing(self.model_size, self.emb_dropout, sequence='d',
                                                   variational=self.variational_dropout)
@@ -315,19 +316,9 @@ class SpeechLSTMDecoder(nn.Module):
             mask_src = None
 
         if input_.size(0) > 1 and input_.size(1) > 1:
-            # print(dec_seq)
-            #
-            lengths = input.gt(onmt.constants.PAD).sum(-1)
-            # print("lengs_tgt")
-            # print(lengths)
-            # print(lengths.shape)
-            # print(dec_emb.shape)
-            # print("lengs_tgt")
 
+            lengths = input.gt(onmt.constants.PAD).sum(-1)
             dec_in = pack_padded_sequence(dec_emb, lengths, batch_first=True, enforce_sorted=False)
-            # print(hid_cell[0].shape)
-            # print(hid_cell[1].shape)
-            # print(dec_emb.shape)
             dec_out, hidden = self.lstm(dec_in, hid_cell)
             dec_out = pad_packed_sequence(dec_out, batch_first=True)[0]
         else:
@@ -344,7 +335,10 @@ class SpeechLSTMDecoder(nn.Module):
         dec_out = dec_out.transpose(0,1)
         # print(dec_out.shape)
         # print(attn_mask.shape)
+
         output , coverage = self.multihead_tgt(dec_out, context, context , attn_mask)
+
+
         output = (output + dec_out)
         output = self.postprocess_layer(output)
 
