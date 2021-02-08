@@ -53,6 +53,9 @@ def build_tm_model(opt, dicts):
     else:
         raise NotImplementedError
 
+    #temporary fix for speech autoencoder
+
+
     if opt.reconstruct:
         # reconstruction is only compatible
         assert opt.model == 'relative_transformer'
@@ -75,7 +78,8 @@ def build_tm_model(opt, dicts):
                               noise_distribution=noise_distribution, noise_ratio=opt.nce_noise)
         generators = [generator]
     else:
-        generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
+        if "tgt"  in dicts:
+            generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
                                                           fix_norm=opt.fix_norm_output_embedding)]
 
     # BUILD EMBEDDINGS
@@ -89,10 +93,13 @@ def build_tm_model(opt, dicts):
     if opt.join_embedding and embedding_src is not None:
         embedding_tgt = embedding_src
         print("* Joining the weights of encoder and decoder word embeddings")
-    else:
+    elif 'tgt' in dicts:
+
         embedding_tgt = nn.Embedding(dicts['tgt'].size(),
                                      opt.model_size,
                                      padding_idx=onmt.constants.PAD) #done
+    else:
+        embedding_tgt = None
 
     if opt.use_language_embedding: #done
         print("* Create language embeddings with %d languages" % len(dicts['langs']))
@@ -120,10 +127,9 @@ def build_tm_model(opt, dicts):
         model = RelativeTransformer(encoder, decoder, nn.ModuleList(generators),
                                     None, None,mirror=opt.mirror_loss)
 
-    elif opt.model == "LSTM":
-        print("LSTM")
+    elif opt.model == "LSTM_v2":
         onmt.constants.init_value = opt.param_init
-        from onmt.models.LSTM_based import SpeechLSTMDecoder, SpeechLSTMEncoder, SpeechLSTMSeq2Seq
+        from onmt.models.speech_recognizer.lstm_v2 import SpeechLSTMDecoder, SpeechLSTMEncoder, SpeechLSTMSeq2Seq
 
         encoder = SpeechLSTMEncoder(opt, None,  opt.encoder_type)
 
@@ -132,6 +138,17 @@ def build_tm_model(opt, dicts):
         model = SpeechLSTMSeq2Seq(encoder, decoder, nn.ModuleList(generators))
         # print(model)
         # sys.exit()
+
+    elif opt.model == "LSTM":
+
+        onmt.constants.init_value = opt.param_init
+        from onmt.models.LSTM_based import SpeechLSTMDecoder, SpeechLSTMEncoder, SpeechLSTMSeq2Seq
+
+        encoder = SpeechLSTMEncoder(opt, None, opt.encoder_type)
+
+        decoder = SpeechLSTMDecoder(opt, embedding_tgt, language_embeddings=language_embeddings)
+
+        model = SpeechLSTMSeq2Seq(encoder, decoder, nn.ModuleList(generators))
     elif opt.model in ['multilingual_translator', 'translator']:
         onmt.constants.init_value = opt.param_init
         from onmt.models.multilingual_translator.relative_transformer import \
@@ -143,7 +160,18 @@ def build_tm_model(opt, dicts):
 
         model = RelativeTransformer(encoder, decoder, nn.ModuleList(generators),
                                     None, None, mirror=opt.mirror_loss)
+    elif opt.model == "speech_ae" or  opt.model == "speech2speech" :
+        onmt.constants.init_value = opt.param_init
+        from onmt.models.speech_metamorphosis.speechae import SpeechLSTMEncoder
+        from onmt.models.speech_metamorphosis.speechae import  TacotronDecoder, SpeechAE
 
+        encoder = SpeechLSTMEncoder(opt, None, opt.encoder_type)
+
+        decoder = TacotronDecoder(opt)
+
+        model = SpeechAE(encoder,decoder,opt)
+
+        print("Create speech autoencoder successfully")
     elif opt.model in ['transformer', 'stochastic_transformer']:
         onmt.constants.init_value = opt.param_init
 
@@ -267,7 +295,9 @@ def build_tm_model(opt, dicts):
     if opt.tie_weights:
         print("* Joining the weights of decoder input and output embeddings")
         model.tie_weights()
-
+    if opt.tie_weights_lid:
+        print("* Joining the weights of output lid  and language embeddings")
+        model.tie_weights_lid()
     return model
 
 
@@ -356,11 +386,11 @@ def init_model_parameters(model, opt):
             m.reset_parameters(init=opt.init)
 
     model.apply(weights_init)
-
-    if hasattr(model, 'decoder'):
-        model.decoder.word_lut.apply(weights_init)
-    else:
-        model.tgt_embedding.apply(weights_init)
+    if opt.model != "speech_ae" and  opt.model != "speech2speech"  :
+        if hasattr(model, 'decoder'):
+            model.decoder.word_lut.apply(weights_init)
+        else:
+            model.tgt_embedding.apply(weights_init)
 
     return
 

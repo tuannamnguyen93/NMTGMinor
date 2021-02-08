@@ -6,16 +6,17 @@ import onmt.modules
 import argparse
 import torch
 import time, datetime
-from onmt.train_utils.trainer import XETrainer
+from onmt.train_utils.trainer import XETrainer, SpeechAETrainer
 from onmt.data.mmap_indexed_dataset import MMapIndexedDataset
 from onmt.data.scp_dataset import SCPIndexDataset
-from onmt.modules.loss import NMTLossFunc, NMTAndCTCLossFunc
-from onmt.model_factory import build_model, optimize_model
+from onmt.modules.loss import NMTLossFunc, NMTAndCTCLossFunc, Tacotron2Loss
+from onmt.model_factory import build_model, optimize_model, init_model_parameters
 from onmt.bayesian_factory import build_model as build_bayesian_model
 from options import make_parser
 from collections import defaultdict
 import os
 import numpy as np
+import sys
 
 parser = argparse.ArgumentParser(description='train.py')
 onmt.markdown.add_md_help_argument(parser)
@@ -53,6 +54,14 @@ def numpy_to_torch(tensor_list):
             out_list.append(tensor)
 
     return out_list
+
+
+def run_process(gpu, train_data, valid_data, dicts, opt, checkpoint):
+
+    from onmt.train_utils.mp_trainer import Trainer
+
+    trainer = Trainer(gpu, train_data, valid_data, dicts, opt)
+    trainer.run(checkpoint=checkpoint)
 
 
 def main():
@@ -131,8 +140,7 @@ def main():
                                           batch_size_words=opt.batch_size_words,
                                           data_type=dataset.get("type", "text"), sorting=True,
                                           batch_size_sents=opt.batch_size_sents,
-                                          upsampling=opt.upsampling,
-                                          num_split=len(opt.gpus))
+                                          upsampling=opt.upsampling)
             else:
                 valid_data = onmt.StreamDataset(numpy_to_torch(valid_dict['src']), numpy_to_torch(valid_dict['tgt']),
                                                 valid_src_langs, valid_tgt_langs,
@@ -166,13 +174,19 @@ def main():
             else:
                 train_src = MMapIndexedDataset(train_path + '.src')
 
-            train_tgt = MMapIndexedDataset(train_path + '.tgt')
+            if os.path.exists(train_path + '.tgt.bin'):
+                train_tgt = MMapIndexedDataset(train_path + '.tgt')
+            else:
+                train_tgt = None
 
             # check the lang files if they exist (in the case of multi-lingual models)
             if os.path.exists(train_path + '.src_lang.bin'):
                 assert 'langs' in dicts
                 train_src_langs = MMapIndexedDataset(train_path + '.src_lang')
-                train_tgt_langs = MMapIndexedDataset(train_path + '.tgt_lang')
+                if os.path.exists(train_path + '.tgt_lang.bin'):
+                    train_tgt_langs = MMapIndexedDataset(train_path + '.tgt_lang')
+                else:
+                    train_tgt_langs = None
             else:
                 train_src_langs = list()
                 train_tgt_langs = list()
@@ -183,16 +197,24 @@ def main():
             # check the length files if they exist
             if os.path.exists(train_path + '.src_sizes.npy'):
                 train_src_sizes = np.load(train_path + '.src_sizes.npy')
-                train_tgt_sizes = np.load(train_path + '.tgt_sizes.npy')
+
             else:
-                train_src_sizes, train_tgt_sizes = None, None
+                train_src_sizes= None
+
+            if os.path.exists(train_path + '.tgt_sizes.npy'):
+                train_tgt_sizes = np.load(train_path + '.tgt_sizes.npy')
+
+            else:
+                train_tgt_sizes= None
 
             if opt.encoder_type == 'audio':
                 data_type = 'audio'
             else:
                 data_type = 'text'
 
+
             if not opt.streaming:
+
                 train_data = onmt.Dataset(train_src,
                                           train_tgt,
                                           train_src_sizes, train_tgt_sizes,
@@ -201,57 +223,68 @@ def main():
                                           data_type=data_type, sorting=True,
                                           batch_size_sents=opt.batch_size_sents,
                                           multiplier=opt.batch_size_multiplier,
-                                          src_align_right=opt.src_align_right,
+                                          max_length_multiplier=opt.n_frames_per_step,
                                           augment=opt.augment_speech,
+                                          src_align_right=opt.src_align_right,
                                           upsampling=opt.upsampling,
                                           cleaning=True, verbose=True,
                                           num_split=len(opt.gpus))
-            else:
-                train_data = onmt.StreamDataset(train_src,
-                                                train_tgt,
-                                                train_src_langs, train_tgt_langs,
-                                                batch_size_words=opt.batch_size_words,
-                                                data_type=data_type, sorting=False,
-                                                batch_size_sents=opt.batch_size_sents,
-                                                multiplier=opt.batch_size_multiplier,
-                                                upsampling=opt.upsampling)
+
+
+
 
             valid_path = opt.data + '.valid'
             if opt.data_format in ['scp', 'scpmem']:
                 valid_src = SCPIndexDataset(audio_data['valid'], concat=opt.concat)
             else:
                 valid_src = MMapIndexedDataset(valid_path + '.src')
-            valid_tgt = MMapIndexedDataset(valid_path + '.tgt')
 
-            if os.path.exists(valid_path + '.src_lang.bin'):
+            if os.path.exists(valid_path + '.tgt.bin'):
+                valid_tgt = MMapIndexedDataset(valid_path + '.tgt')
+            else:
+                valid_tgt = None
+
+            if os.path.exists(train_path + '.src_lang.bin'):
                 assert 'langs' in dicts
                 valid_src_langs = MMapIndexedDataset(valid_path + '.src_lang')
-                valid_tgt_langs = MMapIndexedDataset(valid_path + '.tgt_lang')
+                if os.path.exists(train_path + '.tgt_lang.bin'):
+                    valid_tgt_langs = MMapIndexedDataset(valid_path + '.tgt_lang')
+                else:
+                    valid_tgt_langs = None
             else:
                 valid_src_langs = list()
                 valid_tgt_langs = list()
-
-                # Allocation one for the bilingual case
+                # Allocate a Tensor(1) for the bilingual case
                 valid_src_langs.append(torch.Tensor([dicts['langs']['src']]))
                 valid_tgt_langs.append(torch.Tensor([dicts['langs']['tgt']]))
+
+
 
             # check the length files if they exist
             if os.path.exists(valid_path + '.src_sizes.npy'):
                 valid_src_sizes = np.load(valid_path + '.src_sizes.npy')
-                valid_tgt_sizes = np.load(valid_path + '.tgt_sizes.npy')
             else:
-                valid_src_sizes, valid_tgt_sizes = None, None
+                valid_src_sizes= None
+
+            if os.path.exists(valid_path + '.tgt_sizes.npy'):
+                valid_tgt_sizes = np.load(valid_path + '.tgt_sizes.npy')
+
+            else:
+                valid_tgt_sizes= None
+
 
             if not opt.streaming:
+
                 valid_data = onmt.Dataset(valid_src, valid_tgt,
                                           valid_src_sizes, valid_tgt_sizes,
                                           valid_src_langs, valid_tgt_langs,
                                           batch_size_words=opt.batch_size_words,
                                           data_type=data_type, sorting=True,
                                           batch_size_sents=opt.batch_size_sents,
+                                          max_length_multiplier=opt.n_frames_per_step,
                                           src_align_right=opt.src_align_right,
-                                          cleaning=True, verbose=True, debug=True,
-                                          num_split=len(opt.gpus))
+                                          cleaning=True, verbose=True, debug=True)
+
             else:
                 # for validation data, we have to go through sentences (very slow but to ensure correctness)
                 valid_data = onmt.StreamDataset(valid_src, valid_tgt,
@@ -328,6 +361,7 @@ def main():
                     data_type = 'text'
 
                 if not opt.streaming:
+
                     train_data = onmt.Dataset(src_data,
                                               tgt_data,
                                               src_sizes, tgt_sizes,
@@ -389,8 +423,7 @@ def main():
                                               data_type=data_type, sorting=True,
                                               batch_size_sents=opt.batch_size_sents,
                                               src_align_right=opt.src_align_right,
-                                              cleaning=True, verbose=True, debug=True,
-                                              num_split=len(opt.gpus))
+                                            cleaning=True, verbose=True, debug=True)
 
                     valid_sets.append(valid_data)
 
@@ -405,23 +438,15 @@ def main():
         print("* Loading dictionaries from the checkpoint")
         dicts = checkpoint['dicts']
     else:
-        dicts['tgt'].patch(opt.patch_vocab_multiplier)
+        if  "tgt"  in dicts:
+            dicts['tgt'].patch(opt.patch_vocab_multiplier)
         checkpoint = None
 
-    # Put the vocab mask from dicts to the datasets
-    for data in [train_data, valid_data]:
-        if isinstance(data, list):
-            for i, data_ in enumerate(data):
-                data_.set_mask(dicts['tgt'].vocab_mask)
-                data[i] = data_
-        else:
-            data.set_mask(dicts['tgt'].vocab_mask)
-
-    if "src" in dicts:
+    if "src" in dicts :
         print(' * vocabulary size. source = %d; target = %d' %
               (dicts['src'].size(), dicts['tgt'].size()))
-    else:
-        print('[INFO] vocabulary size. target = %d' %
+    elif "tgt" in dicts :
+        print(' * vocabulary size. target = %d' %
               (dicts['tgt'].size()))
 
     print('* Building model...')
@@ -437,6 +462,10 @@ def main():
             loss_function = NMTAndCTCLossFunc(dicts['tgt'].size(),
                                               label_smoothing=opt.label_smoothing,
                                               ctc_weight=opt.ctc_loss)
+        elif opt.model == "speech_ae":
+
+            loss_function = Tacotron2Loss()
+
         elif opt.nce:
             from onmt.modules.nce.nce_loss import NCELoss
             loss_function = NCELoss(opt.model_size, dicts['tgt'].size(), noise_ratio=opt.nce_noise,
@@ -450,7 +479,8 @@ def main():
         # This function replaces modules with the more optimized counterparts so that it can run faster
         # Currently exp with LayerNorm
         if not opt.memory_profiling:
-            optimize_model(model, fp16=opt.fp16)
+            optimize_model(model)
+
 
     else:
         from onmt.model_factory import build_fusion
@@ -463,19 +493,27 @@ def main():
     n_params = sum([p.nelement() for p in model.parameters()])
     print('* number of parameters: %d' % n_params)
 
+    # We need to initialize the model parameters before sending out to distributed
+    print('Initializing model parameters')
+    init_model_parameters(model, opt)
+
     if not opt.debugging and len(opt.gpus) == 1:
         if opt.bayes_by_backprop:
 
             from onmt.train_utils.bayes_by_backprop_trainer import BayesianTrainer
             trainer = BayesianTrainer(model, loss_function, train_data, valid_data, dicts, opt)
+        elif opt.model == "speech_ae":
+            trainer = SpeechAETrainer(model, loss_function, train_data, valid_data, dicts, opt)
+            print(" TacotronTrainer successfully")
 
         else:
             trainer = XETrainer(model, loss_function, train_data, valid_data, dicts, opt)
-    else:
-        from onmt.train_utils.new_trainer import Trainer
-        trainer = Trainer(model, loss_function, train_data, valid_data, dicts, opt)
 
-    trainer.run(checkpoint=checkpoint)
+        trainer.run(checkpoint=checkpoint)
+    else:
+        raise NotImplementedError
+
+
 
 
 if __name__ == "__main__":
