@@ -80,7 +80,29 @@ def make_parser(parser):
                         help='Using one layer universally (recurrent)')
     parser.add_argument('-act', action='store_true',
                         help='Using ACT for Universal models (TODO)')
-
+    #Tacotron Decoder options
+    parser.add_argument('-max_decoder_steps', type=int, default=1000,
+                        help='Max decoder step')
+    parser.add_argument('-n_mel_channels', type=int, default=40,
+                        help='Number of mel channels')
+    parser.add_argument('-n_frames_per_step', type=int, default=1,
+                        help='Number of frames per step ')
+    parser.add_argument('-gate_threshold', type=float, default=0.5,
+                        help='Gate threshold value')
+    parser.add_argument('-prenet_dim', type=int, default=256,
+                        help='Size of prenet layer')
+    parser.add_argument('-attention_dim', type=int, default=128,
+                        help='Size of attention layer')
+    parser.add_argument('-attention_location_n_filters', type=int, default=32,
+                        help='Number filters of attention location')
+    parser.add_argument('-attention_location_kernel_size', type=int, default=31,
+                        help='Size of attention layer')
+    parser.add_argument('-postnet_embedding_dim', type=int, default=512,
+                        help='Size of postnet embedding')
+    parser.add_argument('-postnet_n_convolutions', type=int, default=5,
+                        help='Size of postnet embedding')
+    parser.add_argument('-postnet_kernel_size', type=int, default=5,
+                        help='Size of postnet kernel convolution')
     # Transforer Model options
     parser.add_argument('-use_language_embedding', action='store_true',
                         help="""Language embedding to add into the word embeddings""")
@@ -109,6 +131,9 @@ def make_parser(parser):
     parser.add_argument('-activation_layer', default='linear_relu_linear', type=str,
                         help='The activation layer in each transformer block '
                              'linear_relu_linear|linear_swish_linear|maxout')
+    parser.add_argument('-activation', default='relu', type=str,
+                        help='The activation layer in each transformer block '
+                             'relu|silu|swish')
     parser.add_argument('-time', default='positional_encoding', type=str,
                         help='Type of time representation positional_encoding|gru|lstm')
     parser.add_argument('-version', type=float, default=1.0,
@@ -211,6 +236,8 @@ def make_parser(parser):
     # pretrained word vectors
     parser.add_argument('-tie_weights', action='store_true',
                         help='Tie the weights of the encoder and decoder layer')
+    parser.add_argument('-tie_weights_lid', action='store_true',
+                        help='Tie the weights of the lid network and decoder layer')
     parser.add_argument('-experimental', action='store_true',
                         help='Set the model into the experimental mode (trying unverified features)')
     parser.add_argument('-join_embedding', action='store_true',
@@ -287,28 +314,25 @@ def make_parser(parser):
                         help="Bottleneck size for the LFV vector).")
     parser.add_argument('-conv_kernel', type=int, default=31,
                         help="Kernels for convolution in conformer).")
-    parser.add_argument('-no_batch_norm', action='store_true',
-                        help="Remove Batch Norm to avoid NaN errors that can happen with spec augmentation.).")
-    parser.add_argument('-depthwise_conv', action='store_true',
-                        help='Use depthwise convolution in the encoder block')
+    parser.add_argument('-gumbel_embedding', action='store_true',
+                        help="Use an gumbel embedding for language embedding")
+    parser.add_argument('-lid_loss', action='store_true',
+                        help="Use Lid Loss function")
+    parser.add_argument('-bottleneck', action='store_true',
+                        help="Use bottleneck")
+    parser.add_argument('-dynamic_conv', action='store_true',
+                        help="Use an additional layer of dynamic convolution).")
+    parser.add_argument('-no_self_attention', action='store_true',
+                        help="Disable self attention in encoder).")
+    parser.add_argument('-no_emb_scale', action='store_true',
+                        help="Disable self attention in encoder).")
 
     parser.add_argument('-multilingual_factorized_weights', action='store_true',
-                        help='Factorize the weights in the model for multilingual')
+                        help='Use multilingual language identifier to get LFV for each language')
     parser.add_argument('-mfw_rank', type=int, default=1,
-                        help="Rank of the mfw vectors.")
+                        help="Bottleneck size for the LFV vector).")
     parser.add_argument('-mfw_multiplicative', action='store_true',
-                        help='Use another multiplicative weights W = W^ * M + A')
-
-    parser.add_argument('-multilingual_partitioned_weights', action='store_true',
-                        help='Partition the weights in the multilingual models')
-    parser.add_argument('-mpw_factor_size', type=int, default=8,
-                        help="Size of the language factor vector")
-    parser.add_argument('-multilingual_layer_norm', action='store_true',
-                        help='New norm for each language')
-    parser.add_argument('-multilingual_linear_projection', action='store_true',
-                        help='New linear projection for each language')
-    parser.add_argument('-sub_encoder', type=int, default=4,
-                        help='New linear projection for each language')
+                        help='Use multilingual language identifier to get LFV for each language')
 
     # for Reformer
     # parser.add_argument('-lsh_src_attention', action='store_true',
@@ -483,25 +507,21 @@ def backward_compatible(opt):
     if not hasattr(opt, 'macaron'):
         opt.macaron = False
 
-    if not hasattr(opt, 'depthwise_conv'):
-        opt.depthwise_conv = False
+    if not hasattr(opt, 'activation'):
+        opt.activation = 'relu'
 
     if not hasattr(opt, 'fused_ffn'):
         opt.fused_ffn = False
 
-    if not hasattr(opt, 'no_batch_norm'):
-        opt.no_batch_norm = False
+    if not hasattr(opt, 'dynamic_conv'):
+        opt.dynamic_conv = False
 
-    if not hasattr(opt, 'multilingual_partitioned_weights'):
-        opt.multilingual_partitioned_weights = False
+    if not hasattr(opt, 'no_self_attention'):
+        opt.no_self_attention = False
 
-    if not hasattr(opt, 'mpw_factor_size'):
-        opt.mpw_factor_size = 1
+    if not hasattr(opt, 'no_emb_scale'):
+        opt.no_self_attention = False
 
-    if not hasattr(opt, 'multilingual_layer_norm'):
-        opt.multilingual_layer_norm = False
 
-    if not hasattr(opt, 'multilingual_linear_projection'):
-        opt.multilingual_linear_projection = False
 
     return opt
