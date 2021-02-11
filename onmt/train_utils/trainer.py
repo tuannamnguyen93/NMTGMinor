@@ -363,7 +363,7 @@ class SpeechAETrainer(BaseTrainer):
             gate_padded = batch.get('gate_padded')
 
             if self.opt.n_frames_per_step > 1:
-                slice = torch.arange(0, gate_padded.size(1), self.opt.n_frames_per_step)
+                slice = torch.arange(self.opt.n_frames_per_step - 1, gate_padded.size(1), self.opt.n_frames_per_step)
                 gate_padded = gate_padded[:, slice]
 
             src_org = batch.get('source_org')
@@ -570,7 +570,7 @@ class SpeechAETrainer(BaseTrainer):
                 gate_padded = batch.get('gate_padded')
 
                 if self.opt.n_frames_per_step > 1:
-                    slice = torch.arange(0, gate_padded.size(1), self.opt.n_frames_per_step)
+                    slice = torch.arange(self.opt.n_frames_per_step - 1, gate_padded.size(1), self.opt.n_frames_per_step)
                     gate_padded = gate_padded[:, slice]
 
                 src_org = batch.get('source_org')
