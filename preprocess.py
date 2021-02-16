@@ -393,23 +393,28 @@ def main():
             src_data, src_sizes = make_bases2s_data(src_file, stride=opt.stride, concat=opt.concat,
                                                     prev_context=opt.previous_context, num_workers=opt.num_threads,
                                                     fp16=opt.fp16,asr_format=opt.asr_format,output_format=opt.format)
-        n_samples = len(src_data)
-        if n_input_files == 1:
-            # For single-file cases we only need to have 1 language per file
-            # which will be broadcasted
-            src_lang_data = [torch.Tensor([dicts['langs'][src_lang]])]
 
-        else:
-            # each sample will have a different language id
-            src_lang_data = [torch.Tensor([dicts['langs'][src_lang]]) for _ in range(n_samples)]
-        train['src'] += src_data
-        train['src_sizes'] += src_sizes
-        train['src_lang'] += src_lang_data
-        train['tgt_sizes'] = None
-        train['tgt'] = None
-        train['tgt_lang'] = None
+            n_samples = len(src_data)
 
-        print('Preparing validation ...')
+            if n_input_files == 1:
+                # For single-file cases we only need to have 1 language per file
+                # which will be broadcasted
+                src_lang_data = [torch.Tensor([dicts['langs'][src_lang]])]
+
+
+            else:
+                # each sample will have a different language id
+                src_lang_data = [torch.Tensor([dicts['langs'][src_lang]]) for _ in range(n_samples)]
+            
+            train['src'] += src_data
+            train['src_sizes'] += src_sizes
+            train['src_lang'] += src_lang_data
+
+            train['tgt_sizes'] = None
+            train['tgt'] = None
+            train['tgt_lang'] = None
+
+        print('Preparing validation speech autoencoder...')
         src_input_files = opt.valid_src.split("|")
         src_langs = opt.valid_src_lang.split("|")
 
@@ -419,29 +424,28 @@ def main():
         valid['src_sizes'] = list()
         valid['src_lang'] = list()
 
-        n_input_files = len(src_input_files)
 
         for (src_file, src_lang) in zip(src_input_files, src_langs):
             src_data, src_sizes = make_bases2s_data(src_file, stride=opt.stride, concat=opt.concat,
                                                     prev_context=opt.previous_context, num_workers=opt.num_threads,
                                                     fp16=opt.fp16,asr_format=opt.asr_format, output_format=opt.format )
 
-        n_samples = len(src_data)
-        if n_input_files == 1:
-            # For single-file cases we only need to have 1 language per file
-            # which will be broadcasted
-            src_lang_data = [torch.Tensor([dicts['langs'][src_lang]])]
+            n_samples = len(src_data)
+            if n_input_files == 1:
+                # For single-file cases we only need to have 1 language per file
+                # which will be broadcasted
+                src_lang_data = [torch.Tensor([dicts['langs'][src_lang]])]
 
-        else:
-            # each sample will have a different language id
-            src_lang_data = [torch.Tensor([dicts['langs'][src_lang]]) for _ in range(n_samples)]
+            else:
+                # each sample will have a different language id
+                src_lang_data = [torch.Tensor([dicts['langs'][src_lang]]) for _ in range(n_samples)]
 
-        valid['src'] += src_data
-        valid['src_sizes'] += src_sizes
-        valid['src_lang'] += src_lang_data
-        valid['tgt_sizes'] = None
-        valid['tgt'] = None
-        valid['tgt_lang'] = None
+            valid['src'] += src_data
+            valid['src_sizes'] += src_sizes
+            valid['src_lang'] += src_lang_data
+            valid['tgt_sizes'] = None
+            valid['tgt'] = None
+            valid['tgt_lang'] = None
 
     elif opt.asr:
         print('Preparing training acoustic model ...')
