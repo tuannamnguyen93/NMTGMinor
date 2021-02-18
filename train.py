@@ -6,10 +6,10 @@ import onmt.modules
 import argparse
 import torch
 import time, datetime
-from onmt.train_utils.trainer import XETrainer, SpeechAETrainer
+from onmt.train_utils.trainer import XETrainer, SpeechAETrainer, SpeechFNTrainer
 from onmt.data.mmap_indexed_dataset import MMapIndexedDataset
 from onmt.data.scp_dataset import SCPIndexDataset
-from onmt.modules.loss import NMTLossFunc, NMTAndCTCLossFunc, Tacotron2Loss
+from onmt.modules.loss import NMTLossFunc, NMTAndCTCLossFunc, Tacotron2Loss, AttributeLoss
 from onmt.model_factory import build_model, optimize_model, init_model_parameters
 from onmt.bayesian_factory import build_model as build_bayesian_model
 from options import make_parser
@@ -455,7 +455,7 @@ def main():
         if opt.bayes_by_backprop:
             model = build_bayesian_model(opt, dicts)
         else:
-            model = build_model(opt, dicts)
+            model, lat_dis = build_model(opt, dicts)
 
         """ Building the loss function """
         if opt.ctc_loss != 0:
@@ -465,7 +465,10 @@ def main():
         elif opt.model == "speech_ae":
 
             loss_function = Tacotron2Loss()
-
+        elif opt.model == "speech_FN":
+            loss_function_ae = Tacotron2Loss()
+            loss_function_lat_dis = AttributeLoss()
+            loss_function = (loss_function_ae, loss_function_lat_dis)
         elif opt.nce:
             from onmt.modules.nce.nce_loss import NCELoss
             loss_function = NCELoss(opt.model_size, dicts['tgt'].size(), noise_ratio=opt.nce_noise,
@@ -505,6 +508,9 @@ def main():
         elif opt.model == "speech_ae":
             trainer = SpeechAETrainer(model, loss_function, train_data, valid_data, dicts, opt)
             print(" TacotronTrainer successfully")
+        elif  opt.model == "speech_FN":
+
+            trainer = SpeechFNTrainer(model, lat_dis, loss_function, train_data, valid_data, dicts, opt)
 
         else:
             trainer = XETrainer(model, loss_function, train_data, valid_data, dicts, opt)
