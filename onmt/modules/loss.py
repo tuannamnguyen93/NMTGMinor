@@ -4,28 +4,57 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.modules.loss import _Loss
-
+import sys
 import onmt
 import onmt.modules
 from onmt.utils import flip
 
 
-def tiny_value_of_dtype(dtype: torch.dtype):
-    """
-    Returns a moderately tiny value for a given PyTorch data type that is used to avoid numerical
-    issues such as division by zero.
-    This is different from `info_value_of_dtype(dtype).tiny` because it causes some NaN bugs.
-    Only supports floating point dtypes.
-    """
-    if not dtype.is_floating_point:
-        raise TypeError("Only supports floating point dtypes.")
-    if dtype == torch.float or dtype == torch.double:
-        return 1e-13
-    elif dtype == torch.half:
-        return 1e-4
-    else:
-        raise TypeError("Does not support dtype " + str(dtype))
+class AttributeLoss(_Loss):
+    def __init__(self):
+        super(AttributeLoss, self).__init__()
 
+    def forward(self, logits, targets, mask, adversarial=False):
+        n_cat, bs = logits.size(-1), logits.size(0)
+
+        if adversarial:
+            shift = torch.LongTensor(targets.size()).random_(n_cat)
+            targets = (targets + shift.to(targets.device)) % n_cat
+
+        gtruth = targets.unsqueeze(1).expand(-1,logits.size(0)).contiguous().view(-1)  # B*T
+        logits = logits.transpose(0,1).contiguous().view(-1, n_cat)  # B*T x V
+
+
+        lprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
+        non_pad_mask = mask.contiguous().view(-1)
+        nll_loss = -lprobs.gather(1, gtruth.unsqueeze(1))[non_pad_mask]
+        nll_loss = nll_loss.mean()
+        loss = nll_loss
+
+
+        return loss
+
+class Tacotron2Loss(_Loss):
+    def __init__(self):
+        super(Tacotron2Loss, self).__init__()
+
+    def forward(self, model_output, targets):
+
+        mel_target, gate_target = targets[0], targets[1]
+
+        gate_target = gate_target.view(-1, 1)
+
+
+        mel_out, mel_out_postnet, gate_out, _ = model_output
+
+        gate_out = gate_out.view(-1, 1)
+        mel_out = mel_out.float()
+        mel_target = mel_target.float()
+        mel_out_postnet = mel_out_postnet.float()
+        mel_loss = nn.MSELoss()(mel_out, mel_target) + \
+            nn.MSELoss()(mel_out_postnet, mel_target)
+        gate_loss = nn.BCEWithLogitsLoss()(gate_out, gate_target)
+        return mel_loss +  gate_loss
 
 class CrossEntropyLossBase(_Loss):
     """
@@ -59,25 +88,15 @@ class CrossEntropyLossBase(_Loss):
         else:
             self.softmax_xentropy = None
 
-    def _compute_loss(self, logits, targets, vocab_mask=None):
+    def _compute_loss(self, logits, targets):
         """
         :param logits: T x B x V or B x T x V tensor (output of decoder)
         :param targets: T x B x V or B x T target tensor
-        :param vocab_mask V: bool tensor or None
         :return:
         """
-        label_smoothing = self.label_smoothing if self.training else 0.0
-
-        # if vocab_mask is not None:
-        #     if vocab_mask.any():
-        #         vocab_mask = vocab_mask.to(logits.device)
-        #         while vocab_mask.dim() < logits.dim():
-        #             vocab_mask = vocab_mask.unsqueeze(0)
-        #         logits = logits.float() + (~vocab_mask + tiny_value_of_dtype(logits.dtype)).log()
-
         gtruth = targets.view(-1)  # B*T
         logits = logits.view(-1, logits.size(-1))  # B*T x V
-
+        label_smoothing = self.label_smoothing if self.training else 0.0
         eps_i = self.smoothing_value if self.training else 0.0
 
         if not self.fast_xentropy:
@@ -132,16 +151,17 @@ class NMTLossFunc(CrossEntropyLossBase):
     def get_loss_function(self, name):
         return self.extra_modules[name] if name in self.extra_modules else None
 
-    def forward(self, model_outputs, targets, model=None, vocab_mask=None, **kwargs):
+    def forward(self, model_outputs, targets, model=None, backward=False, normalizer=1, **kwargs):
         """
         Compute the loss. Subclass must define this method.
         Args:
-            :param vocab_mask:
             :param model_outputs:  a dictionary containing the predictive output from the model.
                                                       time x batch x vocab_size
                                                    or time x batch x hidden_size
             :param targets: the validate target to compare output with. time x batch
             :param model: passing the model in for necessary components
+            :param backward: to control if we should perform backward pass (to free the graph) or not
+            :param normalizer:the denominator of the loss before backward
         """
 
         outputs = model_outputs['hidden']
@@ -157,7 +177,7 @@ class NMTLossFunc(CrossEntropyLossBase):
             reverse_targets = model_outputs['reverse_target']
             alpha = 1.0
 
-        loss, loss_data = self._compute_loss(logits, targets, vocab_mask=vocab_mask)
+        loss, loss_data = self._compute_loss(logits, targets)
 
         total_loss = loss
 
@@ -215,6 +235,9 @@ class NMTLossFunc(CrossEntropyLossBase):
             total_loss = total_loss + rec_loss
         else:
             rec_loss, rec_loss_data = None, None
+
+        if backward:
+            total_loss.div(normalizer).backward()
 
         output_dict = {"loss": loss, "data": loss_data,
                        "rev_loss": rev_loss, "rev_loss_data": rev_loss_data, "mirror_loss": mirror_loss,
