@@ -15,6 +15,24 @@ from onmt.modules.optimized.encdec_attention import EncdecMultiheadAttn
 from onmt.modules.dropout import embedded_dropout
 from onmt.models.speech_recognizer.relative_transformer_layers import LIDFeedForward_small
 
+
+class LatentDiscrinator(nn.Module):
+    def __init__(self, opt, hidden_size, output_size):
+        super(LatentDiscrinator, self).__init__()
+        self.model_size = opt.model_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+
+        self.proj_layers = nn.Sequential(
+            nn.Linear(self.model_size, self.hidden_size),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(self.hidden_size, self.output_size)
+        )
+
+    def forward(self,encoder_outputs ):
+        #input = Variable(encoder_outputs['context'].data)
+        return self.proj_layers(encoder_outputs)
+    
 class SpeechLSTMEncoder(nn.Module):
     def __init__(self, opt, embedding, encoder_type='audio'):
         super(SpeechLSTMEncoder, self).__init__()
@@ -126,7 +144,7 @@ class SpeechLSTMEncoder(nn.Module):
     #
     #     return seq_2, hid
 
-    def forward(self, input, hid=None):
+    def forward(self, input, src_lang = None, hid=None):
         # print(input)
         if not self.cnn_downsampling:
             mask_src = input.narrow(2, 0, 1).squeeze(2).gt(onmt.constants.PAD)
@@ -166,7 +184,7 @@ class SpeechLSTMEncoder(nn.Module):
         return output_dict
 
 class TacotronDecoder(nn.Module):
-    def __init__(self, opt):
+    def __init__(self, opt, accent_emdedding=None):
         super(TacotronDecoder, self).__init__()
         self.n_mel_channels = opt.n_mel_channels
         self.n_frames_per_step = opt.n_frames_per_step
@@ -178,6 +196,8 @@ class TacotronDecoder(nn.Module):
         self.gate_threshold = 0.5
         self.p_attention_dropout = opt.attn_dropout
         self.p_decoder_dropout = opt.dropout
+        self.accent_embedding = accent_emdedding
+        self.use_accent_embedding = opt.use_language_embedding
         self.encoder_type = opt.encoder_type
 
         self.prenet = Prenet(
@@ -343,7 +363,7 @@ class TacotronDecoder(nn.Module):
         gate_prediction = self.gate_layer(decoder_hidden_attention_context)
         return decoder_output, gate_prediction, self.attention_weights
 
-    def forward(self, src_mask, encoder_out, decoder_inputs, **kwargs):
+    def forward(self, src_mask, encoder_out, decoder_inputs, src_lang=None ,**kwargs):
         """ Decoder forward pass for training
         PARAMS
         ------
@@ -356,6 +376,9 @@ class TacotronDecoder(nn.Module):
         gate_outputs: gate outputs from the decoder
         alignments: sequence of attention weights from the decoder
         """
+        if self.use_accent_embedding:
+            accent_emb = self.accent_embedding(src_lang)
+            encoder_out = encoder_out + accent_emb.unsqueeze(1)
 
         decoder_input = self.get_go_frame(encoder_out).unsqueeze(0)
         decoder_inputs = self.parse_decoder_inputs(decoder_inputs)
@@ -409,7 +432,7 @@ class TacotronDecoder(nn.Module):
             gate_outputs += [gate_output]
             alignments += [alignment]
 
-            if torch.sigmoid(gate_output.data) > 0.3:
+            if torch.sigmoid(gate_output.data) > self.gate_threshold:
                 break
             elif len(mel_outputs) == self.max_decoder_steps:
                 print("Warning! Reached max decoder steps")
@@ -444,12 +467,25 @@ class SpeechAE(nn.Module):
 
             outputs[0].data.masked_fill_(mask, 0.0)
             outputs[1].data.masked_fill_(mask, 0.0)
-            slice = torch.arange(0, mask.size(2), self.n_frames_per_step)
+            slice = torch.arange(self.n_frames_per_step -1, mask.size(2), self.n_frames_per_step)
 
             outputs[2].data.masked_fill_(mask[:, 0, slice], 1e3)
 
 
         return outputs
+
+    def encode(self,batch):
+        src = batch.get('source')
+        src_org = batch.get('source_org')
+        src_lengths = batch.get('src_lengths')
+        src_lengths_org = batch.get('src_lengths_org')
+
+        src = src.transpose(0, 1)  # transpose to have batch first
+
+        encoder_output = self.encoder(src)
+        encoder_output = defaultdict(lambda: None, encoder_output)
+        return encoder_output
+
 
     def forward(self, batch):
 
@@ -457,6 +493,7 @@ class SpeechAE(nn.Module):
         src_org = batch.get('source_org')
         src_lengths = batch.get('src_lengths')
         src_lengths_org = batch.get('src_lengths_org')
+        src_lang = batch.get('source_lang')
         src = src.transpose(0, 1) # transpose to have batch first
 
 
@@ -464,18 +501,23 @@ class SpeechAE(nn.Module):
         encoder_output = defaultdict(lambda: None, encoder_output)
         context = encoder_output['context']
         src_mask = encoder_output['src_mask']
+
         context = context.transpose(0,1)
-
-
+        # text_inputs, text_lengths, mels, max_len, output_lengths = inputs
+        # text_lengths, output_lengths = text_lengths.data, output_lengths.data
+        #
+        # embedded_inputs = self.embedding(text_inputs).transpose(1, 2)
+        #
+        # encoder_outputs = self.encoder(embedded_inputs, text_lengths)
         decoder_input =  src_org.narrow(2, 1, src_org.size(2) - 1)
         decoder_input = decoder_input.permute(1,2,0)
         mel_outputs, gate_outputs, alignments  = self.tacotron_decoder(
-            src_mask, context, decoder_input)
+            src_mask, context, decoder_input,src_lang=src_lang)
 
         mel_outputs_postnet = self.postnet(mel_outputs)
         mel_outputs_postnet = mel_outputs + mel_outputs_postnet
 
-        return self.parse_output(
+        return encoder_output, self.parse_output(
             [mel_outputs, mel_outputs_postnet, gate_outputs, alignments],
             src_lengths_org)
 
