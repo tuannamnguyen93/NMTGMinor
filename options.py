@@ -103,6 +103,16 @@ def make_parser(parser):
                         help='Size of postnet embedding')
     parser.add_argument('-postnet_kernel_size', type=int, default=5,
                         help='Size of postnet kernel convolution')
+    parser.add_argument("-lambda_clf", type=float, default=0.0,
+                        help="Classifier loss feedback coefficient")
+    parser.add_argument("-lambda_lat_dis", type=float, default=0.1,
+                        help="Latent discriminator loss feedback coefficient")
+    parser.add_argument("-n_step_ae", type=int, default=1,
+                        help="Number of Autoencoder steps")
+    parser.add_argument("-n_step_lat_dis", type=int, default=1,
+                        help="Number of Latern Discriminator steps")
+    parser.add_argument("-n_clf", type=int, default=1,
+                        help="Number of Classifier steps")
     # Transforer Model options
     parser.add_argument('-use_language_embedding', action='store_true',
                         help="""Language embedding to add into the word embeddings""")

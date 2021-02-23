@@ -44,7 +44,6 @@ torch.manual_seed(opt.seed)
 
 
 def numpy_to_torch(tensor_list):
-
     out_list = list()
 
     for tensor in tensor_list:
@@ -57,7 +56,6 @@ def numpy_to_torch(tensor_list):
 
 
 def run_process(gpu, train_data, valid_data, dicts, opt, checkpoint):
-
     from onmt.train_utils.mp_trainer import Trainer
 
     trainer = Trainer(gpu, train_data, valid_data, dicts, opt)
@@ -65,7 +63,6 @@ def run_process(gpu, train_data, valid_data, dicts, opt, checkpoint):
 
 
 def main():
-
     if not opt.multi_dataset:
         if opt.data_format in ['bin', 'raw']:
             start = time.time()
@@ -199,22 +196,20 @@ def main():
                 train_src_sizes = np.load(train_path + '.src_sizes.npy')
 
             else:
-                train_src_sizes= None
+                train_src_sizes = None
 
             if os.path.exists(train_path + '.tgt_sizes.npy'):
                 train_tgt_sizes = np.load(train_path + '.tgt_sizes.npy')
 
             else:
-                train_tgt_sizes= None
+                train_tgt_sizes = None
 
             if opt.encoder_type == 'audio':
                 data_type = 'audio'
             else:
                 data_type = 'text'
 
-
             if not opt.streaming:
-
                 train_data = onmt.Dataset(train_src,
                                           train_tgt,
                                           train_src_sizes, train_tgt_sizes,
@@ -229,9 +224,6 @@ def main():
                                           upsampling=opt.upsampling,
                                           cleaning=True, verbose=True,
                                           num_split=len(opt.gpus))
-
-
-
 
             valid_path = opt.data + '.valid'
             if opt.data_format in ['scp', 'scpmem']:
@@ -258,20 +250,17 @@ def main():
                 valid_src_langs.append(torch.Tensor([dicts['langs']['src']]))
                 valid_tgt_langs.append(torch.Tensor([dicts['langs']['tgt']]))
 
-
-
             # check the length files if they exist
             if os.path.exists(valid_path + '.src_sizes.npy'):
                 valid_src_sizes = np.load(valid_path + '.src_sizes.npy')
             else:
-                valid_src_sizes= None
+                valid_src_sizes = None
 
             if os.path.exists(valid_path + '.tgt_sizes.npy'):
                 valid_tgt_sizes = np.load(valid_path + '.tgt_sizes.npy')
 
             else:
-                valid_tgt_sizes= None
-
+                valid_tgt_sizes = None
 
             if not opt.streaming:
 
@@ -423,7 +412,7 @@ def main():
                                               data_type=data_type, sorting=True,
                                               batch_size_sents=opt.batch_size_sents,
                                               src_align_right=opt.src_align_right,
-                                            cleaning=True, verbose=True, debug=True)
+                                              cleaning=True, verbose=True, debug=True)
 
                     valid_sets.append(valid_data)
 
@@ -438,14 +427,14 @@ def main():
         print("* Loading dictionaries from the checkpoint")
         dicts = checkpoint['dicts']
     else:
-        if  "tgt"  in dicts:
+        if "tgt" in dicts:
             dicts['tgt'].patch(opt.patch_vocab_multiplier)
         checkpoint = None
 
-    if "src" in dicts :
+    if "src" in dicts:
         print(' * vocabulary size. source = %d; target = %d' %
               (dicts['src'].size(), dicts['tgt'].size()))
-    elif "tgt" in dicts :
+    elif "tgt" in dicts:
         print(' * vocabulary size. target = %d' %
               (dicts['tgt'].size()))
 
@@ -455,7 +444,7 @@ def main():
         if opt.bayes_by_backprop:
             model = build_bayesian_model(opt, dicts)
         else:
-            model, lat_dis = build_model(opt, dicts)
+            model, lat_dis, clf = build_model(opt, dicts)
 
         """ Building the loss function """
         if opt.ctc_loss != 0:
@@ -508,9 +497,9 @@ def main():
         elif opt.model == "speech_ae":
             trainer = SpeechAETrainer(model, loss_function, train_data, valid_data, dicts, opt)
             print(" TacotronTrainer successfully")
-        elif  opt.model == "speech_FN":
+        elif opt.model == "speech_FN":
 
-            trainer = SpeechFNTrainer(model, lat_dis, loss_function, train_data, valid_data, dicts, opt)
+            trainer = SpeechFNTrainer(model, lat_dis, loss_function, train_data, valid_data, dicts, opt, clf=clf)
 
         else:
             trainer = XETrainer(model, loss_function, train_data, valid_data, dicts, opt)
@@ -518,8 +507,6 @@ def main():
         trainer.run(checkpoint=checkpoint)
     else:
         raise NotImplementedError
-
-
 
 
 if __name__ == "__main__":
