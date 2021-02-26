@@ -3,13 +3,14 @@ import torch.nn as nn
 import onmt
 from onmt.models.transformers import TransformerEncoder, TransformerDecoder, Transformer, MixedEncoder
 from onmt.models.relative_transformer import RelativeTransformerEncoder, RelativeTransformerDecoder, \
-            RelativeTransformer
+    RelativeTransformer
 from onmt.models.transformer_layers import PositionalEncoding
 from onmt.models.relative_transformer import SinusoidalPositionalEmbedding, RelativeTransformer
 from onmt.modules.copy_generator import CopyGenerator
 from options import backward_compatible
 import math
 import sys
+
 init = torch.nn.init
 
 MAX_LEN = onmt.constants.max_position_length  # This should be the longest sentence from the dataset
@@ -53,8 +54,7 @@ def build_tm_model(opt, dicts):
     else:
         raise NotImplementedError
 
-    #temporary fix for speech autoencoder
-
+    # temporary fix for speech autoencoder
 
     if opt.reconstruct:
         # reconstruction is only compatible
@@ -78,9 +78,9 @@ def build_tm_model(opt, dicts):
                               noise_distribution=noise_distribution, noise_ratio=opt.nce_noise)
         generators = [generator]
     else:
-        if "tgt"  in dicts:
+        if "tgt" in dicts:
             generators = [onmt.modules.base_seq2seq.Generator(opt.model_size, dicts['tgt'].size(),
-                                                          fix_norm=opt.fix_norm_output_embedding)]
+                                                              fix_norm=opt.fix_norm_output_embedding)]
 
     # BUILD EMBEDDINGS
     if 'src' in dicts:
@@ -97,11 +97,11 @@ def build_tm_model(opt, dicts):
 
         embedding_tgt = nn.Embedding(dicts['tgt'].size(),
                                      opt.model_size,
-                                     padding_idx=onmt.constants.PAD) #done
+                                     padding_idx=onmt.constants.PAD)  # done
     else:
         embedding_tgt = None
 
-    if opt.use_language_embedding: #done
+    if opt.use_language_embedding:  # done
         print("* Create language embeddings with %d languages" % len(dicts['langs']))
         language_embeddings = nn.Embedding(len(dicts['langs']), opt.model_size)
     else:
@@ -125,13 +125,13 @@ def build_tm_model(opt, dicts):
         decoder = SpeechTransformerDecoder(opt, embedding_tgt, positional_encoder,
                                            language_embeddings=language_embeddings)
         model = RelativeTransformer(encoder, decoder, nn.ModuleList(generators),
-                                    None, None,mirror=opt.mirror_loss)
+                                    None, None, mirror=opt.mirror_loss)
 
     elif opt.model == "LSTM_v2":
         onmt.constants.init_value = opt.param_init
         from onmt.models.speech_recognizer.lstm_v2 import SpeechLSTMDecoder, SpeechLSTMEncoder, SpeechLSTMSeq2Seq
 
-        encoder = SpeechLSTMEncoder(opt, None,  opt.encoder_type)
+        encoder = SpeechLSTMEncoder(opt, None, opt.encoder_type)
 
         decoder = SpeechLSTMDecoder(opt, embedding_tgt, language_embeddings=language_embeddings)
 
@@ -160,18 +160,44 @@ def build_tm_model(opt, dicts):
 
         model = RelativeTransformer(encoder, decoder, nn.ModuleList(generators),
                                     None, None, mirror=opt.mirror_loss)
-    elif opt.model == "speech_ae" or  opt.model == "speech2speech" :
+    elif opt.model == "speech_ae" or opt.model == "speech2speech":
         onmt.constants.init_value = opt.param_init
         from onmt.models.speech_metamorphosis.speechae import SpeechLSTMEncoder
-        from onmt.models.speech_metamorphosis.speechae import  TacotronDecoder, SpeechAE
+        from onmt.models.speech_metamorphosis.speechae import TacotronDecoder, SpeechAE
 
         encoder = SpeechLSTMEncoder(opt, None, opt.encoder_type)
 
         decoder = TacotronDecoder(opt)
 
-        model = SpeechAE(encoder,decoder,opt)
+        model = SpeechAE(encoder, decoder, opt)
 
         print("Create speech autoencoder successfully")
+
+    elif opt.model == "speech_FN":
+
+        onmt.constants.init_value = opt.param_init
+        from onmt.models.speech_metamorphosis.speechae import SpeechLSTMEncoder, LatentDiscrinator, Classifier
+        from onmt.models.speech_metamorphosis.speechae import TacotronDecoder, SpeechAE
+
+        encoder = SpeechLSTMEncoder(opt, None, opt.encoder_type)
+
+        decoder = TacotronDecoder(opt, accent_emdedding=language_embeddings)
+
+        model_ae = SpeechAE(encoder, decoder, opt)
+
+        lat_dis = LatentDiscrinator(opt, hidden_size=128, output_size=len(dicts['langs']))
+
+        clf = None
+
+        if opt.n_clf > 0:
+
+            clf = Classifier(opt, hidden_size=128, output_size=len(dicts['langs']))
+
+        model = (model_ae, lat_dis, clf)
+
+        print("Create speech fader network successfully")
+
+
     elif opt.model in ['transformer', 'stochastic_transformer']:
         onmt.constants.init_value = opt.param_init
 
@@ -386,7 +412,7 @@ def init_model_parameters(model, opt):
             m.reset_parameters(init=opt.init)
 
     model.apply(weights_init)
-    if opt.model != "speech_ae" and  opt.model != "speech2speech"  :
+    if opt.model != "speech_ae" and opt.model != "speech_FN":
         if hasattr(model, 'decoder'):
             model.decoder.word_lut.apply(weights_init)
         else:
@@ -501,4 +527,3 @@ def optimize_model(model, distributed=False):
 
     if distributed:
         sync_batch_norm(model, "Transformer")
-
