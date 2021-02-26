@@ -20,18 +20,25 @@ class LatentDiscrinator(nn.Module):
     def __init__(self, opt, hidden_size, output_size):
         super(LatentDiscrinator, self).__init__()
         self.model_size = opt.model_size
+        self.dropout = opt.dropout
         self.hidden_size = hidden_size
         self.output_size = output_size
+        self.linear_in = nn.Linear(self.model_size, self.hidden_size)
+        self.last_linear = nn.Linear(self.hidden_size, self.output_size)
 
-        self.proj_layers = nn.Sequential(
-            nn.Linear(self.model_size, self.hidden_size),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(self.hidden_size, self.output_size)
-        )
+        # self.proj_layers = nn.Sequential(
+        #     nn.Linear(self.model_size, self.hidden_size),
+        #     nn.LeakyReLU(0.2, inplace=True),
+        #     nn.Dropout(opt.dropout),
+        #     nn.Linear(self.hidden_size, self.output_size)
+        # )
 
     def forward(self, encoder_outputs):
+        hidden = F.relu(self.linear_in(encoder_outputs))
+        hidden = F.dropout(hidden, p=self.dropout, training=self.training)
+        logits = self.last_linear(hidden)
         # input = Variable(encoder_outputs['context'].data)
-        return self.proj_layers(encoder_outputs)
+        return logits
 
 
 class Classifier(nn.Module):
@@ -41,7 +48,6 @@ class Classifier(nn.Module):
         self.lat_dis = LatentDiscrinator(opt, hidden_size, output_size)
 
     def forward(self, input):
-
         encoder_outputs = self.encoder(input)
         return self.lat_dis(encoder_outputs['context']), encoder_outputs['src_mask']
 
@@ -83,7 +89,6 @@ class SpeechLSTMEncoder(nn.Module):
         self.channels = 1
 
         self.lid_network = None
-
 
         if opt.upsampling:
             feature_size = feature_size // 4
@@ -184,7 +189,7 @@ class SpeechLSTMEncoder(nn.Module):
             hidden_size = seq.size(2) // 2
             seq = seq[:, :, :hidden_size] + seq[:, :, hidden_size:]
 
-        seq = self.postprocess_layer(seq)
+       # seq = self.postprocess_layer(seq)
 
         output_dict = {'context': seq.transpose(0, 1), 'src_mask': mask_src}
 
@@ -430,10 +435,10 @@ class TacotronDecoder(nn.Module):
         if self.use_accent_embedding:
             accent_emb = self.accent_embedding(src_lang)
             encoder_out = encoder_outputs + accent_emb.unsqueeze(1)
-
             lengths = src_mask.sum(-1).float()
             seq = pack_padded_sequence(encoder_out, lengths, batch_first=True, enforce_sorted=False)
             seq, hid = self.rnn(seq)
+
             encoder_out = pad_packed_sequence(seq, batch_first=True)[0]
             hidden_size = encoder_out.size(2) // 2
             encoder_out = encoder_out[:, :, :hidden_size] + encoder_out[:, :, hidden_size:]

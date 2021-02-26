@@ -11,6 +11,7 @@ import torch
 import sys
 from apex import amp
 import random
+from torch.autograd import Variable
 
 import onmt
 import onmt.markdown
@@ -361,7 +362,7 @@ class SpeechFNTrainer(object):
                 keep_batchnorm_fp32 = False
 
             if self.cuda:
-                # print(234)
+                
                 self.model_ae, self.optim_ae.optimizer = amp.initialize(self.model_ae,
                                                                         self.optim_ae.optimizer,
                                                                         opt_level=opt_level,
@@ -459,8 +460,8 @@ class SpeechFNTrainer(object):
             exit()
 
     def clf_backward(self, batch):
-        oom = False
         self.clf.train()
+        loss_data = 0.0
 
         try:
             src_org = batch.get('source')
@@ -496,7 +497,7 @@ class SpeechFNTrainer(object):
         if loss != loss:
 
             # catching NAN problem
-            oom = True
+            self.oom = True
 
             self.model_ae.zero_grad()
             self.loss_lat_dis.zero_grad()
@@ -513,22 +514,25 @@ class SpeechFNTrainer(object):
         else:
             self.nan_counter = 0
 
-        if not oom:
-            self.optim_clf.step()
-
-            self.model_ae.zero_grad()
-            self.loss_lat_dis.zero_grad()
-            self.clf.zero_grad()
-            self.optim_ae.zero_grad()
-            self.optim_clf.zero_grad()
-            self.optim_lat_dis.zero_grad()
+        # if not oom:
+        #
+        #     self.model_ae.zero_grad()
+        #     self.loss_lat_dis.zero_grad()
+        #     self.optim_ae.zero_grad()
+        #     self.optim_lat_dis.zero_grad()
+        #
+        #     self.optim_clf.step()
+        #
+        #     self.optim_clf.zero_grad()
+        #     self.clf.zero_grad()
 
         return loss_data
 
     def lat_dis_backward(self, batch):
-        oom = False
+
         self.model_ae.eval()
         self.lat_dis.train()
+        loss_data = 0.0
         try:
             encoder_outputs = self.model_ae.encode(batch)
             preds = self.lat_dis(encoder_outputs['context'].detach())
@@ -555,7 +559,7 @@ class SpeechFNTrainer(object):
         except RuntimeError as e:
             if 'out of memory' in str(e):
                 print('| WARNING: ran out of memory on GPU , skipping batch')
-                oom = True
+                self.oom = True
                 torch.cuda.empty_cache()
                 loss = 0
             else:
@@ -564,13 +568,15 @@ class SpeechFNTrainer(object):
         if loss != loss:
 
             # catching NAN problem
-            oom = True
+            self.oom = True
             self.model_ae.zero_grad()
             self.loss_lat_dis.zero_grad()
-            self.clf.zero_grad()
             self.optim_ae.zero_grad()
-            self.optim_clf.zero_grad()
             self.optim_lat_dis.zero_grad()
+
+            if self.clf is not None:
+                self.clf.zero_grad()
+                self.optim_clf.zero_grad()
 
             self.nan_counter = self.nan_counter + 1
             print("Warning!!! Loss is Nan")
@@ -580,23 +586,35 @@ class SpeechFNTrainer(object):
         else:
             self.nan_counter = 0
 
-        if not oom:
-            self.optim_lat_dis.step()
-
-            self.model_ae.zero_grad()
-            self.loss_lat_dis.zero_grad()
-            self.clf.zero_grad()
-            self.optim_ae.zero_grad()
-            self.optim_clf.zero_grad()
-            self.optim_lat_dis.zero_grad()
+        # if not oom:
+        #
+        #
+        #     self.model_ae.zero_grad()
+        #     self.optim_ae.zero_grad()
+        #
+        #     if self.clf is not None:
+        #         self.clf.zero_grad()
+        #         self.optim_clf.zero_grad()
+        #
+        #     self.optim_lat_dis.step()
+        #     self.optim_lat_dis.zero_grad()
+        #     self.lat_dis.zero_grad()
 
         return loss_data
 
     def autoencoder_backward(self, batch, step=0):
 
         self.model_ae.train()
-        self.lat_dis.eval()
+        self.lat_dis.train()
+
+        if self.clf is not None:
+            self.clf.train()
         oom = False
+
+        swap_classifier_loss_data = 0.0
+        adversarial_loss_data = 0.0
+        loss_data = 0.0
+
         try:
             encoder_outputs, decoder_outputs = self.model_ae(batch)
 
@@ -619,27 +637,31 @@ class SpeechFNTrainer(object):
                 adversarial_loss = self.loss_lat_dis(lat_dis_preds, batch.get('source_lang'),
                                                      mask=latern['src_mask'], adversarial=True)
                 loss = loss + get_lambda(self.opt.lambda_lat_dis, step) * adversarial_loss  # lambda
+                adversarial_loss_data = adversarial_loss.data.item()
+            #
+            if step > self.opt.n_step_ae_clf:
+                if self.clf is not None:
+                    self.clf.train()
 
-            swap_classifier_loss = 0.0
+                if self.opt.lambda_clf > 0:
+                    fake_attributes = flip_attributes(batch.get('source_lang'), self.n_cat)
+                    outputs_flipped = \
+                        self.model_ae.decode_batch(latern, fake_attributes, batch.get('source_org').size(0))[
+                            0]
+                    outputs_flipped = outputs_flipped.transpose(1, 2)
+                    outputs_flipped_mask = batch.get('source_org').transpose(0, 1).narrow(2, 0, 1)
+                    outputs_flipped = torch.cat([outputs_flipped_mask, outputs_flipped], dim=-1)
+                    flip_pred, src_mask = self.clf(outputs_flipped)
 
-            if self.opt.lambda_clf > 0:
-                self.clf.train()
-                fake_attributes = flip_attributes(batch.get('source_lang'), self.n_cat)
-                outputs_flipped = self.model_ae.decode_batch(latern, fake_attributes, batch.get('source_org').size(0))[0]
-                outputs_flipped = outputs_flipped.transpose(1, 2)
-                outputs_flipped_mask = batch.get('source_org').transpose(0, 1).narrow(2, 0, 1)
-                outputs_flipped = torch.cat([outputs_flipped_mask, outputs_flipped], dim=-1)
+                    swap_classifier_loss = self.loss_lat_dis(flip_pred, fake_attributes, mask=latern['src_mask'],
+                                                             adversarial=False)
 
-                flip_pred, src_mask = self.clf(outputs_flipped)
+                    swap_classifier_loss_data = swap_classifier_loss.data.item()
 
-                swap_classifier_loss = self.loss_lat_dis(flip_pred, fake_attributes, mask=latern['src_mask'],
-                                                         adversarial=False)
-
-                loss = loss + get_lambda(self.opt.lambda_clf, step) * swap_classifier_loss
+                    loss = loss + get_lambda(self.opt.lambda_clf, step) * swap_classifier_loss
 
             loss_data = loss.data.item()
-            adversarial_loss_data = adversarial_loss.data.item()
-            swap_classifier_loss_data = swap_classifier_loss.data.item()
+
             # a little trick to avoid gradient overflow with fp16
             full_loss = loss
 
@@ -657,7 +679,7 @@ class SpeechFNTrainer(object):
         except RuntimeError as e:
             if 'out of memory' in str(e):
                 print('| WARNING: ran out of memory on GPU , skipping batch')
-                oom = True
+                self.oom = True
                 torch.cuda.empty_cache()
                 loss = 0
             else:
@@ -666,11 +688,13 @@ class SpeechFNTrainer(object):
         if loss != loss:
             oom = True
             self.model_ae.zero_grad()
-            self.loss_lat_dis.zero_grad()
-            self.clf.zero_grad()
+            self.lat_dis.zero_grad()
             self.optim_ae.zero_grad()
-            self.optim_clf.zero_grad()
             self.optim_lat_dis.zero_grad()
+
+            if self.clf is not None:
+                self.clf.zero_grad()
+                self.optim_clf.zero_grad()
 
             self.nan_counter = self.nan_counter + 1
             print("Warning!!! Loss is Nan")
@@ -680,15 +704,20 @@ class SpeechFNTrainer(object):
         else:
 
             self.nan_counter = 0
-
-        self.optim_ae.step()
-
-        self.model_ae.zero_grad()
-        self.loss_lat_dis.zero_grad()
-        self.clf.zero_grad()
-        self.optim_ae.zero_grad()
-        self.optim_clf.zero_grad()
-        self.optim_lat_dis.zero_grad()
+        #
+        #
+        # self.lat_dis.zero_grad()
+        #
+        # self.optim_lat_dis.zero_grad()
+        #
+        # if self.clf is not None:
+        #     self.clf.zero_grad()
+        #     self.optim_clf.zero_grad()
+        #
+        # self.optim_ae.step()
+        #
+        # self.optim_ae.zero_grad()
+        # self.model_ae.zero_grad()
 
         return loss_data, adversarial_loss_data, swap_classifier_loss_data
 
@@ -777,19 +806,21 @@ class SpeechFNTrainer(object):
         if self.cuda:
             self.warm_up()
             #
-            valid_loss_ae, valid_loss_lat_dis, valid_loss_clf = self.eval(self.valid_data)
+            valid_loss_ae, valid_loss_lat_dis, valid_loss_clf, val_loss_swap_clf = self.eval(self.valid_data)
             #
             print('Validation loss ae: %g' % valid_loss_ae)
             print('Validation loss latent discriminator: %g' % valid_loss_lat_dis)
             print('Validation loss classifier: %g' % valid_loss_clf)
+            print('Validation swap loss classifier: %g' % val_loss_swap_clf)
         #
+
         self.start_time = time.time()
 
         for epoch in range(start_epoch, start_epoch + opt.epochs):
             print('')
 
             #  (1) train for one epoch on the training set
-            train_loss_ae, train_loss_lat_dis, train_loss_adv, train_loss_clf_swap, train_loss_clf = self.train_epoch(
+            train_loss_ae, train_loss_lat_dis, train_loss_adv, train_loss_clf, train_loss_clf_swap = self.train_epoch(
                 epoch, resume=resume,
                 itr_progress=itr_progress)
 
@@ -800,19 +831,22 @@ class SpeechFNTrainer(object):
             print('Train loss classifier swap : %g' % train_loss_clf_swap)
 
             # #  (2) evaluate on the validation set
-            valid_loss_ae, valid_loss_lat_dis, val_loss_clf = self.eval(self.valid_data)
+            valid_loss_ae, valid_loss_lat_dis, val_loss_clf, val_loss_swap_clf = self.eval(self.valid_data)
             print('Validation loss ae: %g' % valid_loss_ae)
             print('Validation loss latent discriminator: %g' % valid_loss_lat_dis)
             print('Validation loss classifier: %g' % val_loss_clf)
+            print('Validation swap loss classifier: %g' % val_loss_swap_clf)
             #
             self.save(epoch, valid_loss_ae)
             itr_progress = None
             resume = False
 
     def eval(self, data):
+
         total_loss_ae = 0
         total_loss_lat_dis = 0
         total_loss_clf = 0
+        total_loss_clf_swap = 0
         total_tgt_frames = 0
         total_sent = 0
         opt = self.opt
@@ -821,7 +855,9 @@ class SpeechFNTrainer(object):
         self.loss_function_ae.eval()
         self.lat_dis.eval()
         self.loss_lat_dis.eval()
-        # self.model.reset_states()
+
+        if self.clf is not None:
+            self.clf.train()
 
         # the data iterator creates an epoch iterator
         data_iterator = generate_data_iterator(data, seed=self.opt.seed,
@@ -844,11 +880,13 @@ class SpeechFNTrainer(object):
 
                 if self.cuda:
                     batch.cuda(fp16=self.opt.fp16 and not self.opt.fp16_mixed)
-
                 """ outputs can be either 
                         hidden states from decoder or
                         prob distribution from decoder generator
                 """
+
+                src_lang = batch.get('source_lang')
+
                 encoder_outputs, decoder_outputs = self.model_ae(batch)
 
                 gate_padded = batch.get('gate_padded')
@@ -866,24 +904,38 @@ class SpeechFNTrainer(object):
 
                 preds = self.lat_dis(encoder_outputs['context'])
 
-                loss_lat_dis = self.loss_lat_dis(preds, batch.get('source_lang'), mask=encoder_outputs['src_mask'],
+                loss_lat_dis = self.loss_lat_dis(preds, src_lang, mask=encoder_outputs['src_mask'],
                                                  adversarial=False)
                 loss_lat_dis_data = loss_lat_dis.data.item()
 
-                src_org = batch.get('source_org')
-                src_lang = batch.get('source_lang')
-                preds, src_mask = self.clf(src_org.transpose(0, 1))
-                loss_clf = self.loss_lat_dis(preds, src_lang, mask=src_mask, adversarial=False)
-                loss_clf_data = loss_clf.data.item()
+                if self.clf is not None:
+                    preds, src_mask = self.clf(batch.get('source_org').transpose(0, 1))
+                    loss_clf = self.loss_lat_dis(preds, src_lang, mask=src_mask, adversarial=False)
+                    loss_clf_data = loss_clf.data.item()
+                    total_loss_clf += loss_clf_data
+
+                    fake_attributes = flip_attributes(src_lang, self.n_cat)
+                    latern = self.model_ae.encode(batch)
+                    outputs_flipped = self.model_ae.decode_batch(latern, fake_attributes, src_org.size(0))[0]
+                    outputs_flipped = outputs_flipped.transpose(1, 2)
+                    outputs_flipped_mask = batch.get('source_org').transpose(0, 1).narrow(2, 0, 1)
+                    outputs_flipped = torch.cat([outputs_flipped_mask, outputs_flipped], dim=-1)
+
+                    flip_pred, src_mask = self.clf(outputs_flipped)
+
+                    swap_classifier_loss = self.loss_lat_dis(flip_pred, fake_attributes, mask=latern['src_mask'],
+                                                             adversarial=False)
+
+                    total_loss_clf_swap += swap_classifier_loss
 
                 total_loss_ae += loss_ae_data
                 total_loss_lat_dis += loss_lat_dis_data
-                total_loss_clf += loss_clf_data
+
                 total_tgt_frames += batch.src_size
                 total_sent += batch.size
                 i = i + 1
 
-        return total_loss_ae / data_size * 100, total_loss_lat_dis / data_size * 100, total_loss_clf / data_size * 100
+        return total_loss_ae / data_size * 100, total_loss_lat_dis / data_size * 100, total_loss_clf / data_size * 100, total_loss_clf_swap / data_size * 100
 
     def train_epoch(self, epoch, resume=False, itr_progress=None):
 
@@ -926,11 +978,9 @@ class SpeechFNTrainer(object):
         self.nan_counter = 0
         nan = False
         nan_counter = 0
-        n_step_ae = opt.update_frequency
-        n_step_lat_dis = opt.update_frequency
 
-        mode = ["ae"] * self.opt.n_step_ae + ["lat_dis"] * self.opt.n_step_lat_dis + ["clf"] * self.opt.n_clf
-        random.shuffle(mode)
+        mode = ["ae"] * opt.n_step_ae * opt.update_frequency + [
+            "lat_dis"] * opt.n_step_lat_dis * opt.update_frequency + ["clf"] * opt.n_clf * opt.update_frequency
 
         mode_i = 0
 
@@ -959,14 +1009,12 @@ class SpeechFNTrainer(object):
             if self.cuda:
                 batch.cuda(fp16=self.opt.fp16 and not self.opt.fp16_mixed)
 
-
-
                 # outputs is a dictionary containing keys/values necessary for loss function
                 # can be flexibly controlled within models for easier extensibility
                 #    targets = batch.get('target_output')
                 #  tgt_mask = targets.ne(onmt.constants.PAD)
 
-            oom = False
+            self.oom = False
 
             if mode[mode_i] == "ae":
 
@@ -980,20 +1028,40 @@ class SpeechFNTrainer(object):
 
                 loss_clf = self.clf_backward(batch)
 
+            if not self.oom:
 
-
-
-            if not oom:
                 src_size = batch.src_size
 
-                counter = counter + 1
-                mode_i = mode_i + 1
                 #   We only update the parameters after getting gradients from n mini-batches
                 update_flag = False
-                if mode_i >= len(mode) or i == n_samples:
+
+                if i == n_samples or (mode_i + 1) % opt.update_frequency == 0:
                     update_flag = True
 
                 if update_flag:
+
+                    if mode[mode_i] == "ae":
+                        self.optim_ae.step()
+                    elif mode[mode_i] == "lat_dis":
+                        self.optim_lat_dis.step()
+                    else:
+                        self.optim_clf.step()
+
+                    self.optim_lat_dis.zero_grad()
+                    self.optim_clf.zero_grad()
+                    self.optim_ae.zero_grad()
+                    self.lat_dis.zero_grad()
+                    self.clf.zero_grad()
+                    self.model_ae.zero_grad()
+
+                    self.nan_counter = 0
+                    grad_scaler = -1
+
+                mode_i = mode_i + 1
+
+                if mode_i == len(mode):
+                    mode_i = 0
+
                     # # accumulated gradient case, in this case the update frequency
                     # if (counter == 1 and self.opt.update_frequency != 1) or counter > 1:
                     #     grad_denom = 1 / grad_scaler
@@ -1010,13 +1078,6 @@ class SpeechFNTrainer(object):
                     #                                    self.opt.max_grad_norm)
                     #     torch.nn.utils.clip_grad_norm_(amp.master_params(self.optim_lat_dis.optimizer),
                     #                                    self.opt.max_grad_norm)
-                    self.nan_counter = 0
-                    mode_i = 0
-                    random.shuffle(mode)
-                    counter = 0
-
-
-                    grad_scaler = -1
 
                 report_loss_ae += loss_ae
                 report_loss_lat_dis += loss_lat_dis
@@ -1037,10 +1098,10 @@ class SpeechFNTrainer(object):
 
                 optim_ae = self.optim_ae
                 optim_lat_dis = self.optim_lat_dis
-                optim_clf = self.optim_clf
+
                 # batch_efficiency = total_non_pads / total_tokens
 
-                step = optim_lat_dis._step
+                step = optim_ae._step
 
                 if i == 0 or (i % opt.log_interval == -1 % opt.log_interval):
                     log_string = (
@@ -1049,17 +1110,18 @@ class SpeechFNTrainer(object):
                              report_loss_ae, report_loss_lat_dis, report_loss_adv, report_loss_clf,
                              report_loss_clf_swap))
 
-                    log_string += ("lr_ae: %.7f ; updates: %7d; " %
+                    log_string += ("lr_ae: %.7f ; updates_ae: %7d; " %
                                    (optim_ae.getLearningRate(),
                                     optim_ae._step))
 
-                    log_string += ("lr_lat_dis: %.7f ; updates: %7d; " %
+                    log_string += ("lr_lat_dis: %.7f ; updates_lat_dis: %7d; " %
                                    (optim_lat_dis.getLearningRate(),
                                     optim_lat_dis._step))
-
-                    log_string += ("lr_clf: %.7f ; updates: %7d; " %
-                                   (optim_clf.getLearningRate(),
-                                    optim_clf._step))
+                    if self.clf is not None:
+                        optim_clf = self.optim_clf
+                        log_string += ("lr_clf: %.7f ; updates_clf: %7d; " %
+                                       (optim_clf.getLearningRate(),
+                                        optim_clf._step))
                     #
                     log_string += ("%5.0f src tok/s " %
                                    (report_tgt_frames / (time.time() - start)))

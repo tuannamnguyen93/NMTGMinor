@@ -3,17 +3,15 @@ from torch.nn import functional as F
 from torch import nn
 
 
-def get_mask_from_lengths(lengths,n_frames_per_step=1):
-
+def get_mask_from_lengths(lengths, n_frames_per_step=1):
     max_len = torch.max(lengths).item()
 
-    if  max_len % n_frames_per_step != 0:
+    if max_len % n_frames_per_step != 0:
         max_len += n_frames_per_step - max_len % n_frames_per_step
 
     ids = torch.arange(0, max_len, out=torch.cuda.LongTensor(max_len))
     mask = (ids < lengths.unsqueeze(1)).bool()
     return mask
-
 
 
 class LinearNorm(torch.nn.Module):
@@ -34,7 +32,7 @@ class ConvNorm(torch.nn.Module):
                  padding=None, dilation=1, bias=True, w_init_gain='linear'):
         super(ConvNorm, self).__init__()
         if padding is None:
-            assert(kernel_size % 2 == 1)
+            assert (kernel_size % 2 == 1)
             padding = int(dilation * (kernel_size - 1) / 2)
 
         self.conv = torch.nn.Conv1d(in_channels, out_channels,
@@ -49,6 +47,7 @@ class ConvNorm(torch.nn.Module):
         conv_signal = self.conv(signal)
         return conv_signal
 
+
 class LocationLayer(torch.nn.Module):
     def __init__(self, attention_n_filters, attention_kernel_size,
                  attention_dim):
@@ -62,14 +61,15 @@ class LocationLayer(torch.nn.Module):
                                          bias=False, w_init_gain='tanh')
 
     def forward(self, attention_weights_cat):
-        #(B, 2, max_time)
+        # (B, 2, max_time)
         processed_attention = self.location_conv(attention_weights_cat)
-        #(B, n_filters, max_time)
+        # (B, n_filters, max_time)
         processed_attention = processed_attention.transpose(1, 2)
         # (B, max_time, n_filters)
         processed_attention = self.location_dense(processed_attention)
         # (B, max_time, attention_dim)
         return processed_attention
+
 
 class Attention(torch.nn.Module):
     def __init__(self, attention_rnn_dim, embedding_dim, attention_dim,
@@ -97,14 +97,14 @@ class Attention(torch.nn.Module):
         -------
         alignment (batch, max_time)
         """
-      #  (batch, n_mel_channels * n_frames_per_step)
-        processed_query = self.query_layer(query.unsqueeze(1)) # B, 1,  attn_dim
-        processed_attention_weights = self.location_layer(attention_weights_cat) # (B, max_time, attn_dim)
+        #  (batch, n_mel_channels * n_frames_per_step)
+        processed_query = self.query_layer(query.unsqueeze(1))  # B, 1,  attn_dim
+        processed_attention_weights = self.location_layer(attention_weights_cat)  # (B, max_time, attn_dim)
         energies = self.v(torch.tanh(
             processed_query + processed_attention_weights + processed_memory))
 
         energies = energies.squeeze(-1)
-        return energies   # (B, max_time)
+        return energies  # (B, max_time)
 
     def forward(self, attention_hidden_state, memory, processed_memory,
                 attention_weights_cat, mask):
@@ -129,6 +129,7 @@ class Attention(torch.nn.Module):
 
         return attention_context, attention_weights
 
+
 class Prenet(torch.nn.Module):
     def __init__(self, in_dim, sizes):
         super(Prenet, self).__init__()
@@ -139,8 +140,9 @@ class Prenet(torch.nn.Module):
 
     def forward(self, x):
         for linear in self.layers:
-            x = F.dropout(F.relu(linear(x)), p=0.5, training=True)
+            x = F.dropout(F.relu(linear(x)), p=0.5, training=self.training)
         return x
+
 
 class Postnet(nn.Module):
     """Postnet
@@ -178,7 +180,7 @@ class Postnet(nn.Module):
                          padding=int((hparams.postnet_kernel_size - 1) / 2),
                          dilation=1, w_init_gain='linear'),
                 nn.BatchNorm1d(hparams.n_mel_channels))
-            )
+        )
 
     def forward(self, x):
         for i in range(len(self.convolutions) - 1):
