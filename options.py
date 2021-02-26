@@ -111,6 +111,8 @@ def make_parser(parser):
                         help="Number of Autoencoder steps")
     parser.add_argument("-n_step_lat_dis", type=int, default=1,
                         help="Number of Latern Discriminator steps")
+    parser.add_argument("-n_step_ae_clf", type=int, default=5000,
+                        help="When add loss classifier to loss autoencoder")
     parser.add_argument("-n_clf", type=int, default=1,
                         help="Number of Classifier steps")
     # Transforer Model options
